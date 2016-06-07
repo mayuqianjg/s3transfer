@@ -427,7 +427,6 @@ class GetObjectTask(Task):
     def _main(self, client, bucket, key, fileobj, extra_args, callbacks,
               max_attempts, download_output_manager, start_index=0):
         """Downloads an object and places content into io queue
-
         :param client: The client to use when calling GetObject
         :param bucket: The bucket to download from
         :param key: The key to download from
