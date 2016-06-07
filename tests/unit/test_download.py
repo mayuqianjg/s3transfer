@@ -186,7 +186,7 @@ class TestGetObjectTask(BaseTaskTest):
         default_kwargs = {
             'client': self.client, 'bucket': self.bucket, 'key': self.key,
             'fileobj': self.fileobj, 'extra_args': self.extra_args,
-            'callbacks': self.callbacks,
+            'callbacks': self.callbacks, 
             'max_attempts': self.max_attempts, 'io_executor': self.io_executor
         }
         default_kwargs.update(kwargs)

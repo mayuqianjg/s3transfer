@@ -12,11 +12,12 @@
 # language governing permissions and limitations under the License.
 from __future__ import division
 import os
-import tempfile
 import shutil
 import math
+import tempfile
 
-from botocore.stub import ANY
+import botocore.session
+from botocore.stub import ANY, Stubber
 
 from tests import BaseTaskTest
 from tests import BaseSubmissionTaskTest
@@ -28,14 +29,35 @@ from s3transfer.compat import six
 from s3transfer.futures import IN_MEMORY_UPLOAD_TAG
 from s3transfer.manager import TransferConfig
 from s3transfer.upload import InterruptReader
+from s3transfer.encrypt import IOEncryptor, EncryptionConfig, \
+    AesCbcBodyEncryptorProvider, KmsEnvelopeEncryptorProvider
+from s3transfer.upload import FilenameEncryptionManager
+from s3transfer.upload import PutObjectTask
+from s3transfer.upload import SeekableEncryptionManager
 from s3transfer.upload import UploadFilenameInputManager
+from s3transfer.upload import UploadPartTask
 from s3transfer.upload import UploadSeekableInputManager
 from s3transfer.upload import UploadNonSeekableInputManager
 from s3transfer.upload import UploadSubmissionTask
-from s3transfer.upload import PutObjectTask
-from s3transfer.upload import UploadPartTask
 from s3transfer.utils import CallArgs
 from s3transfer.utils import OSUtils
+
+
+def create_kms_client():
+    client = botocore.session.get_session().create_client('kms')
+    stubber = Stubber(client)
+    response = {
+        'KeyMetadata': {'KeyId': '1234567890'}
+    }
+
+    stubber.add_response('create_key', response)
+
+    response = {
+        'CiphertextBlob': '44444444444'
+    }
+    stubber.add_response('encrypt', response)
+    stubber.activate()
+    return client
 
 
 class InterruptionError(Exception):
@@ -57,7 +79,7 @@ class BaseUploadTest(BaseTaskTest):
 
         self.tempdir = tempfile.mkdtemp()
         self.filename = os.path.join(self.tempdir, 'myfile')
-        self.content = b'my content'
+        self.content = b'my content is a lot of stuff and a little of humor'*10
         self.subscribers = []
 
         with open(self.filename, 'wb') as f:
@@ -128,8 +150,9 @@ class BaseUploadInputManagerTest(BaseUploadTest):
 class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
     def setUp(self):
         super(TestUploadFilenameInputManager, self).setUp()
+
         self.upload_input_manager = UploadFilenameInputManager(
-            self.osutil, self.transfer_coordinator)
+            self.osutil, self.transfer_coordinator, self.config)
         self.call_args = CallArgs(
             fileobj=self.filename, subscribers=self.subscribers)
         self.future = self.get_transfer_future(self.call_args)
@@ -137,7 +160,7 @@ class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
     def test_is_compatible(self):
         self.assertTrue(
             self.upload_input_manager.is_compatible(
-                self.future.meta.call_args.fileobj)
+                self.future.meta.call_args.fileobj, self.config)
         )
 
     def test_stores_bodies_in_memory_put_object(self):
@@ -244,7 +267,7 @@ class TestUploadSeekableInputManager(TestUploadFilenameInputManager):
     def setUp(self):
         super(TestUploadSeekableInputManager, self).setUp()
         self.upload_input_manager = UploadSeekableInputManager(
-            self.osutil, self.transfer_coordinator)
+            self.osutil, self.transfer_coordinator, self.config)
         self.fileobj = open(self.filename, 'rb')
         self.call_args = CallArgs(
             fileobj=self.fileobj, subscribers=self.subscribers)
@@ -256,10 +279,12 @@ class TestUploadSeekableInputManager(TestUploadFilenameInputManager):
 
     def test_is_compatible_bytes_io(self):
         self.assertTrue(
-            self.upload_input_manager.is_compatible(six.BytesIO()))
+            self.upload_input_manager.is_compatible(six.BytesIO(), 
+                                                    self.config))
 
     def test_not_compatible_for_non_filelike_obj(self):
-        self.assertFalse(self.upload_input_manager.is_compatible(object()))
+        self.assertFalse(self.upload_input_manager.is_compatible(object(),
+                                                                self.config))
 
     def test_stores_bodies_in_memory_upload_part(self):
         self.assertTrue(
@@ -270,7 +295,7 @@ class TestUploadNonSeekableInputManager(TestUploadFilenameInputManager):
     def setUp(self):
         super(TestUploadNonSeekableInputManager, self).setUp()
         self.upload_input_manager = UploadNonSeekableInputManager(
-            self.osutil, self.transfer_coordinator)
+            self.osutil, self.transfer_coordinator, self.config)
         self.fileobj = NonSeekableReader(self.content)
         self.call_args = CallArgs(
             fileobj=self.fileobj, subscribers=self.subscribers)
@@ -342,6 +367,124 @@ class TestUploadNonSeekableInputManager(TestUploadFilenameInputManager):
         self.config.multipart_chunksize = 4
         self.config.multipart_threshold = 8
         self.assert_multipart_parts()
+
+
+class TestSeekableEncryptionManager(TestUploadSeekableInputManager):
+    def setUp(self):
+        super(TestSeekableEncryptionManager, self).setUp()
+        client = create_kms_client()
+        key_id = '25b33b36-649d-4f18-9979-3e49cb60c60d'
+        self.config = TransferConfig()
+        self.config.enc_config = EncryptionConfig(
+            env_encryptor_provider=KmsEnvelopeEncryptorProvider(
+                kmsclient=client, kms_key_id=key_id, kms_context=None),
+            body_encryptor_provider=AesCbcBodyEncryptorProvider())
+        self.upload_input_manager = SeekableEncryptionManager(
+            self.osutil, self.transfer_coordinator, self.config)
+        self.upload_input_manager.io_encryptor = \
+            IOEncryptor(self.config.enc_config)
+        self.fileobj = open(self.filename, 'rb')
+        self.addCleanup(self.fileobj.close)
+        self.call_args = CallArgs(
+            fileobj=self.fileobj, subscribers=self.subscribers, extra_args={})
+        self.future = self.get_transfer_future(self.call_args)
+
+    def test_provide_transfer_size(self):
+        self.upload_input_manager.provide_transfer_size(self.future)
+        # The provided file size should be equal to the padded size of the
+        # contents of the file.
+        self.assertEqual(self.future.meta.size, 
+            self.upload_input_manager._calculate_length(len(self.content)))
+
+    def test_get_put_object_body(self):
+        self.future.meta.provide_transfer_size(len(self.content))
+        read_file_chunk = self.upload_input_manager.get_put_object_body(
+            self.future)
+        read_file_chunk.enable_callback()
+        read_file_chunk.read()
+        # The file-like object should also have been wrapped with the
+        # on_queued callbacks to track the amount of bytes being transferred.
+        self.assertEqual(
+            self.recording_subscriber.calculate_bytes_seen(),
+            len(self.content))
+
+    def test_get_put_object_body_is_interruptable(self):
+        pass
+    
+    def test_yield_upload_part_bodies_are_interruptable(self):
+        pass
+
+    def test_yield_upload_part_bodies(self):
+        # Adjust the chunk size to something more grainular for testing.
+        self.config.multipart_chunksize = 16
+        self.future.meta.provide_transfer_size(len(self.content))
+
+        # Get an iterator that will yield all of the bodies and their
+        # respective part number.
+        part_iterator = self.upload_input_manager.yield_upload_part_bodies(
+            self.future, self.config)
+        expected_part_number = 1
+        for part_number, read_file_chunk in part_iterator:
+            # Ensure that the part number is as expected
+            self.assertEqual(part_number, expected_part_number)
+            read_file_chunk.enable_callback()
+            read_file_chunk.read()
+            expected_part_number += 1
+
+        # All of the file-like object should also have been wrapped with the
+        # on_queued callbacks to track the amount of bytes being transferred.
+        # The encryption correctness is checked in test_encrypt.py.
+        parts = expected_part_number - 1
+        each_chunk_size = (self.config.multipart_chunksize)
+        last_chunk_size = len(self.content) - \
+                          (parts - 1) * self.config.multipart_chunksize
+
+        total_size = each_chunk_size * (parts - 1) + \
+                     last_chunk_size
+        self.assertEqual(
+            self.recording_subscriber.calculate_bytes_seen(),
+            total_size)
+
+    def test_stores_bodies_in_memory_put_object(self):
+        self.assertTrue(
+            self.upload_input_manager.stores_body_in_memory('put_object'))
+
+    def test_stores_bodies_in_memory_upload_part(self):
+        self.assertTrue(
+            self.upload_input_manager.stores_body_in_memory('upload_part'))
+
+
+class TestFilenameEncryptionManager(TestSeekableEncryptionManager):
+    def setUp(self):
+        super(TestSeekableEncryptionManager, self).setUp()
+        client = create_kms_client()
+        key_id = '25b33b36-649d-4f18-9979-3e49cb60c60d'
+        self.config = TransferConfig()
+        self.config.enc_config = EncryptionConfig(
+            env_encryptor_provider=KmsEnvelopeEncryptorProvider(
+                kmsclient=client, kms_key_id=key_id, kms_context=None),
+            body_encryptor_provider=AesCbcBodyEncryptorProvider())
+        self.upload_input_manager = \
+            FilenameEncryptionManager(
+                self.osutil, self.transfer_coordinator, self.config)
+        self.upload_input_manager.io_encryptor = \
+            IOEncryptor(self.config.enc_config)
+        self.call_args = CallArgs(
+            fileobj=self.filename, subscribers=self.subscribers)
+        self.future = self.get_transfer_future(self.call_args)
+
+    def test_stores_bodies_in_memory_put_object(self):
+        self.assertTrue(
+            self.upload_input_manager.stores_body_in_memory('put_object'))
+
+    def test_stores_bodies_in_memory_upload_part(self):
+        self.assertTrue(
+            self.upload_input_manager.stores_body_in_memory('upload_part'))
+
+    def test_is_compatible_bytes_io(self):
+        self.assertFalse(
+            self.upload_input_manager.is_compatible(six.BytesIO(), 
+                                                    self.config))
 
 
 class TestUploadSubmissionTask(BaseSubmissionTaskTest):

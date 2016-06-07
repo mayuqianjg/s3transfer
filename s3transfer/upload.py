@@ -82,16 +82,20 @@ class UploadInputManager(object):
     that may be accepted. All implementations must subclass and override
     public methods from this class.
     """
-    def __init__(self, osutil, transfer_coordinator):
+
+    def __init__(self, osutil, transfer_coordinator, config):
         self._osutil = osutil
         self._transfer_coordinator = transfer_coordinator
+        self._config = config
 
     @classmethod
-    def is_compatible(cls, upload_source):
+    def is_compatible(cls, upload_source, config):
         """Determines if the source for the upload is compatible with manager
 
         :param upload_source: The source for which the upload will pull data
             from.
+
+        :param config: The config for which the upload will use.
 
         :returns: True if the manager can handle the type of source specified
             otherwise returns False.
@@ -174,7 +178,7 @@ class UploadInputManager(object):
 class UploadFilenameInputManager(UploadInputManager):
     """Upload utility for filenames"""
     @classmethod
-    def is_compatible(cls, upload_source):
+    def is_compatible(cls, upload_source, config):
         return isinstance(upload_source, six.string_types)
 
     def stores_body_in_memory(self, operation_name):
@@ -182,8 +186,11 @@ class UploadFilenameInputManager(UploadInputManager):
 
     def provide_transfer_size(self, transfer_future):
         transfer_future.meta.provide_transfer_size(
-            self._osutil.get_file_size(
-                transfer_future.meta.call_args.fileobj))
+            self._calculate_length(self._osutil.get_file_size(
+                transfer_future.meta.call_args.fileobj)))
+
+    def _calculate_length(self, length, final=False):
+        return length
 
     def requires_multipart_upload(self, transfer_future, config):
         return transfer_future.meta.size >= config.multipart_threshold
@@ -206,11 +213,22 @@ class UploadFilenameInputManager(UploadInputManager):
             fileobj=fileobj, chunk_size=size, full_file_size=size,
             callbacks=callbacks)
 
-    def yield_upload_part_bodies(self, transfer_future, config):
+    def _get_object_args(self, transfer_future):
+        fileobj = transfer_future.meta.call_args.fileobj
+        callbacks = get_callbacks(transfer_future, 'progress')
+        length = transfer_future.meta.size
+        return [fileobj, callbacks, length]
+
+    def _get_multipart_args(self, transfer_future, config):
         part_size = config.multipart_chunksize
         full_file_size = transfer_future.meta.size
         num_parts = self._get_num_parts(transfer_future, part_size)
         callbacks = get_callbacks(transfer_future, 'progress')
+        return [part_size, num_parts, full_file_size, callbacks]
+
+    def yield_upload_part_bodies(self, transfer_future, config):
+        part_size, num_parts, full_file_size, callbacks = \
+            self._get_multipart_args(transfer_future, config)
         for part_number in range(1, num_parts + 1):
             start_byte = part_size * (part_number - 1)
             # Get a file-like object for that part and the size of the full
@@ -228,11 +246,19 @@ class UploadFilenameInputManager(UploadInputManager):
             read_file_chunk = self._osutil.open_file_chunk_reader_from_fileobj(
                 fileobj=fileobj, chunk_size=part_size,
                 full_file_size=full_size, callbacks=callbacks)
+            read_file_chunk = self._get_upload_chunk(fileobj=read_file_chunk,
+                amt=part_size, part_number=part_number, num_parts=num_parts,
+                full_file_size=full_file_size, part_size=part_size,
+                callbacks=callbacks)
             yield part_number, read_file_chunk
 
     def _get_deferred_open_file(self, fileobj, start_byte):
         fileobj = DeferredOpenFile(fileobj, start_byte)
         fileobj.OPEN_METHOD = self._osutil.open
+        return fileobj
+
+    def _get_upload_chunk(self, fileobj, amt, part_number, num_parts,
+                          full_file_size, part_size, callbacks):
         return fileobj
 
     def _get_put_object_fileobj(self, fileobj):
@@ -246,12 +272,19 @@ class UploadFilenameInputManager(UploadInputManager):
     def _get_num_parts(self, transfer_future, part_size):
         return int(
             math.ceil(transfer_future.meta.size / float(part_size)))
+        
+    def inject_extra_params(self, transfer_future, config):
+        """
+        This function is to check whether pre-treatment is needed or not
+        e.g. encryption or other treatment
+        """
+        return
 
 
 class UploadSeekableInputManager(UploadFilenameInputManager):
     """Upload utility for an open file object"""
     @classmethod
-    def is_compatible(cls, upload_source):
+    def is_compatible(cls, upload_source, config):
         return readable(upload_source) and seekable(upload_source)
 
     def stores_body_in_memory(self, operation_name):
@@ -270,7 +303,7 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
         end_position = fileobj.tell()
         fileobj.seek(start_position)
         transfer_future.meta.provide_transfer_size(
-            end_position - start_position)
+            self._calculate_length(end_position - start_position))
 
     def _get_upload_part_fileobj_with_full_size(self, fileobj, **kwargs):
         # Note: It is unfortunate that in order to do a multithreaded
@@ -293,13 +326,13 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
 
 class UploadNonSeekableInputManager(UploadInputManager):
     """Upload utility for a file-like object that cannot seek."""
-    def __init__(self, osutil, transfer_coordinator):
+    def __init__(self, osutil, transfer_coordinator, config):
         super(UploadNonSeekableInputManager, self).__init__(
-            osutil, transfer_coordinator)
+            osutil, transfer_coordinator, config)
         self._initial_data = b''
 
     @classmethod
-    def is_compatible(cls, upload_source):
+    def is_compatible(cls, upload_source, config):
         return readable(upload_source)
 
     def stores_body_in_memory(self, operation_name):
@@ -415,6 +448,125 @@ class UploadNonSeekableInputManager(UploadInputManager):
         return self._osutil.open_file_chunk_reader_from_fileobj(
             fileobj=fileobj, chunk_size=len(data), full_file_size=len(data),
             callbacks=callbacks)
+  
+
+class FilenameEncryptionManager(UploadFilenameInputManager):
+    @classmethod
+    def is_compatible(cls, upload_source, config):
+        """To judge whether the encryption providers exist.
+        """
+        if getattr(config.enc_config, 'env_encryptor_provider', None):
+            return UploadFilenameInputManager.is_compatible(upload_source,
+                                                            config)
+
+    def stores_body_in_memory(self, operation_name):
+        return True
+    
+    def get_put_object_body(self, transfer_future):
+        fileobj, callbacks, transfer_size = \
+            self._get_object_args(transfer_future)
+        read_file_chunk = self._osutil.open_file_chunk_reader(
+            filename=fileobj, start_byte=0,
+            size=transfer_size, callbacks=callbacks)
+        cipher_text = self.io_encryptor.encrypt_body(
+            fileobj=read_file_chunk, amt=transfer_size, final=True)
+        obj = self._wrap_with_interrupt_reader(six.BytesIO(cipher_text))
+        return self._osutil.open_file_chunk_reader_from_fileobj(
+            fileobj=obj, chunk_size=transfer_size,
+            full_file_size=transfer_size, callbacks=callbacks
+        )
+
+    def _get_upload_chunk(self, fileobj, amt, part_number, num_parts,
+                          full_file_size, part_size, callbacks):
+        if part_number == num_parts:
+            final = True
+            # This is the last chunk and the size would be different
+            transfer_size = \
+                full_file_size - part_size * (part_number - 1)
+        else: 
+            final = False
+            transfer_size = part_size
+        encrypted_text = self.io_encryptor.encrypt_body(
+            fileobj=fileobj, amt=part_size, final=final)
+        wrapped_data = self._wrap_with_interrupt_reader(
+            six.BytesIO(encrypted_text))
+        fileobj = self._osutil.open_file_chunk_reader_from_fileobj(
+            fileobj=wrapped_data, chunk_size=transfer_size,
+            full_file_size=transfer_size, callbacks=callbacks
+        )
+        return fileobj
+
+    def _calculate_length(self, length, final=True):
+        return self.io_encryptor.calculate_size(start=length, final=final)
+
+    def inject_extra_params(self, transfer_future, config):
+        # Perform envelope encryption if needed
+        from s3transfer.encrypt import IOEncryptor    
+        self.io_encryptor = IOEncryptor(config.enc_config)
+        envelope = self.io_encryptor.encrypt_envelope()
+        if 'Metadata' not in transfer_future.meta.call_args.extra_args.keys():
+            transfer_future.meta.call_args.extra_args['Metadata'] = {}
+        transfer_future.meta.call_args.extra_args['Metadata'].update(envelope)
+
+
+class SeekableEncryptionManager(UploadSeekableInputManager):
+    """Encryption interface for a known file chunk"""
+
+    @classmethod
+    def is_compatible(cls, upload_source, config):
+        if getattr(config.enc_config, 'env_encryptor_provider', None):
+            return UploadSeekableInputManager.is_compatible(upload_source,
+                                                             config)
+
+    def stores_body_in_memory(self, operation_name):
+        return True
+        
+    def _calculate_length(self, length, final=True):
+        return self.io_encryptor.calculate_size(start=length, final=final)
+
+    def get_put_object_body(self, transfer_future):
+        fileobj, callbacks, transfer_size = \
+            self._get_object_args(transfer_future)
+        cipher_text = self.io_encryptor.encrypt_body(
+            fileobj=fileobj, amt=transfer_size, final=True)  
+        wrapped_data = self._wrap_with_interrupt_reader(
+            six.BytesIO(cipher_text))
+       
+        return self._osutil.open_file_chunk_reader_from_fileobj(
+            fileobj=wrapped_data,
+            chunk_size=transfer_size,
+            full_file_size=transfer_size,
+            callbacks=callbacks
+        )
+
+    def _get_upload_chunk(self, fileobj, amt, part_number, num_parts,
+                          full_file_size, part_size, callbacks):
+        if part_number == num_parts:
+            final = True
+            # This is the last chunk and the size would be different
+            transfer_size = \
+                full_file_size - part_size * (part_number - 1)
+        else: 
+            final = False
+            transfer_size = part_size
+        encrypted_text = self.io_encryptor.encrypt_body(
+            fileobj=fileobj, amt=amt, final=final)
+        wrapped_data = self._wrap_with_interrupt_reader(
+            six.BytesIO(encrypted_text))
+        fileobj = self._osutil.open_file_chunk_reader_from_fileobj(
+            fileobj=wrapped_data, chunk_size=transfer_size,
+            full_file_size=transfer_size, callbacks=callbacks
+        )
+        return fileobj
+    
+    def inject_extra_params(self, transfer_future, config):
+        # Perform envelope encryption if needed
+        from s3transfer.encrypt import IOEncryptor    
+        self.io_encryptor = IOEncryptor(config.enc_config)
+        envelope = self.io_encryptor.encrypt_envelope()
+        if 'Metadata' not in transfer_future.meta.call_args.extra_args.keys():
+            transfer_future.meta.call_args.extra_args['Metadata'] = {}
+        transfer_future.meta.call_args.extra_args['Metadata'].update(envelope)
 
 
 class UploadSubmissionTask(SubmissionTask):
@@ -427,7 +579,7 @@ class UploadSubmissionTask(SubmissionTask):
         'RequestPayer',
     ]
 
-    def _get_upload_input_manager_cls(self, transfer_future):
+    def _get_upload_input_manager_cls(self, transfer_future, config):
         """Retieves a class for managing input for an upload based on file type
 
         :type transfer_future: s3transfer.futures.TransferFuture
@@ -438,6 +590,8 @@ class UploadSubmissionTask(SubmissionTask):
             input for uploads.
         """
         upload_manager_resolver_chain = [
+            FilenameEncryptionManager,
+            SeekableEncryptionManager,
             UploadFilenameInputManager,
             UploadSeekableInputManager,
             UploadNonSeekableInputManager
@@ -445,7 +599,7 @@ class UploadSubmissionTask(SubmissionTask):
 
         fileobj = transfer_future.meta.call_args.fileobj
         for upload_manager_cls in upload_manager_resolver_chain:
-            if upload_manager_cls.is_compatible(fileobj):
+            if upload_manager_cls.is_compatible(fileobj, config):
                 return upload_manager_cls
         raise RuntimeError(
             'Input %s of type: %s is not supported.' % (
@@ -471,8 +625,13 @@ class UploadSubmissionTask(SubmissionTask):
         :param transfer_future: The transfer future associated with the
             transfer request that tasks are being submitted for
         """
+
         upload_input_manager = self._get_upload_input_manager_cls(
-            transfer_future)(osutil, self._transfer_coordinator)
+            transfer_future, config)(osutil, self._transfer_coordinator,
+            config)
+
+        # Prepare the data
+        upload_input_manager.inject_extra_params(transfer_future, config)
 
         # Determine the size if it was not provided
         if transfer_future.meta.size is None:
@@ -604,6 +763,7 @@ class UploadSubmissionTask(SubmissionTask):
 
 class PutObjectTask(Task):
     """Task to do a nonmultipart upload"""
+
     def _main(self, client, fileobj, bucket, key, extra_args):
         """
         :param client: The client to use when calling PutObject
@@ -619,6 +779,7 @@ class PutObjectTask(Task):
 
 class UploadPartTask(Task):
     """Task to upload a part in a multipart upload"""
+
     def _main(self, client, fileobj, bucket, key, upload_id, part_number,
               extra_args):
         """

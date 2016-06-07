@@ -22,9 +22,9 @@ from s3transfer.utils import CallArgs
 from s3transfer.utils import OSUtils
 from s3transfer.futures import IN_MEMORY_UPLOAD_TAG
 from s3transfer.futures import BoundedExecutor
+from s3transfer.futures import TransferCoordinator
 from s3transfer.futures import TransferFuture
 from s3transfer.futures import TransferMeta
-from s3transfer.futures import TransferCoordinator
 from s3transfer.download import DownloadSubmissionTask
 from s3transfer.upload import UploadSubmissionTask
 from s3transfer.copies import CopySubmissionTask
@@ -44,7 +44,8 @@ class TransferConfig(object):
                  max_submission_queue_size=0,
                  max_io_queue_size=1000,
                  num_download_attempts=5,
-                 max_in_memory_upload_chunks=10):
+                 max_in_memory_upload_chunks=10,
+                 enc_config=None):
         """Configurations for the transfer mangager
 
         :param multipart_threshold: The threshold for which multipart
@@ -102,6 +103,10 @@ class TransferConfig(object):
             be waiting with a single read chunk to be submitted for upload
             because the ``max_in_memory_upload_chunks`` value has been reached
             by the threads making the upload request.
+
+        :param enc_config: The client-side encryption configuration.
+            This is optional. Read encrypt.py for more details about the
+            parameters and settings.
         """
         self.multipart_threshold = multipart_threshold
         self.multipart_chunksize = multipart_chunksize
@@ -112,6 +117,7 @@ class TransferConfig(object):
         self.max_io_queue_size = max_io_queue_size
         self.num_download_attempts = num_download_attempts
         self.max_in_memory_upload_chunks = max_in_memory_upload_chunks
+        self.enc_config = enc_config
 
 
 class TransferManager(object):
@@ -232,6 +238,7 @@ class TransferManager(object):
             fileobj=fileobj, bucket=bucket, key=key, extra_args=extra_args,
             subscribers=subscribers
         )
+
         return self._submit_transfer(call_args, UploadSubmissionTask)
 
     def download(self, bucket, key, fileobj, extra_args=None,

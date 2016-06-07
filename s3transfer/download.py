@@ -356,8 +356,8 @@ class DownloadSubmissionTask(SubmissionTask):
 class GetObjectTask(Task):
     STREAM_CHUNK_SIZE = 64 * 1024
 
-    def _main(self, client, bucket, key, fileobj, extra_args, callbacks,
-              max_attempts, io_executor, start_index=0):
+    def _main(self, client, bucket, key, fileobj, extra_args, 
+              callbacks, max_attempts, io_executor, start_index=0):
         """Downloads an object and places content into io queue
 
         :param client: The client to use when calling GetObject
@@ -378,8 +378,7 @@ class GetObjectTask(Task):
                 response = client.get_object(
                     Bucket=bucket, Key=key, **extra_args)
                 streaming_body = StreamReaderProgress(
-                    response['Body'], callbacks)
-
+                    response['Body'], callbacks)                 
                 current_index = start_index
                 chunks = iter(
                     lambda: streaming_body.read(self.STREAM_CHUNK_SIZE), b'')
