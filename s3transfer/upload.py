@@ -11,6 +11,7 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import math
+import os
 
 from botocore.compat import six
 
@@ -34,7 +35,8 @@ def get_upload_input_manager_cls(transfer_future):
     """
     upload_manager_resolver_chain = [
         UploadFilenameInputManager,
-        UploadSeekableInputManager
+        UploadSeekableInputManager,
+        UploadEncryptionManager
     ]
 
     fileobj = transfer_future.meta.call_args.fileobj
@@ -219,6 +221,150 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
             )
             yield part_number, read_file_chunk
 
+class UploadEncryptionManager(UploadSeekableInputManager):
+    """Encryption utility for a known file chunk"""
+    def __init__(self, osutil, userkey=None, kmsclient=None, kms_key_id=None, \
+                kms_context=None, enc_config=None):
+        self._osutil = osutil
+        self.create_key_iv
+        self._userkey = userkey
+        self._kmsclient = kmsclient
+        self._kms_key_id = kms_key_id
+        self._kms_context = kms_context
+        self._enc_config = enc_config
+        if enc_config is None:
+            self._enc_config = "AESCBC"
+        if kmsclient is None:
+            if not userkey or len(userkey) not in [16, 24, 32]:
+                raise ValueError("userkey error")
+
+    def create_key_iv(self):
+        self._key = os.urandom(32)
+        self._iv = os.urandom(16)
+
+    def provide_transfer_size(self, transfer_future):
+        fileobj = transfer_future.meta.call_args.fileobj
+        # To determine size, first determine the starting position
+        # Seek to the end and then find the difference in the length
+        # between the end and start positions.
+        start_position = fileobj.tell()
+        fileobj.seek(0, 2)
+        end_position = fileobj.tell()
+        fileobj.seek(start_position)
+        length_after_enc=(math.floor((end_position - start_position)/16)+1) * 16
+        transfer_future.meta.provide_transfer_size(
+            length_after_enc)
+
+    def get_put_object_body(self, transfer_future):
+        fileobj = transfer_future.meta.call_args.fileobj
+        callbacks = get_callbacks(transfer_future, 'progress')
+        transfer_size = transfer_future.meta.size
+        #data = fileobj.read(transfer_size)
+        cipher_text, envelope = self.kms_encrypt(fileobj, transfer_size)
+        transfer_future.meta.call_args.extra_args['Metadata'] = envelope
+        wrapped_data = six.BytesIO(cipher_text)
+        return ReadFileChunk(
+            fileobj=wrapped_data, chunk_size=transfer_size,
+            full_file_size=transfer_size, callbacks=callbacks,
+            enable_callbacks=False
+        )
+
+
+    def yield_upload_part_bodies(self, transfer_future, config):
+        part_size = config.multipart_chunksize
+        num_parts = self._get_num_parts(transfer_future, part_size)
+        fileobj = transfer_future.meta.call_args.fileobj
+        callbacks = get_callbacks(transfer_future, 'progress')
+        for part_number in range(1, num_parts + 1):
+            # Note: It is unfortunate that in order to do a multithreaded
+            # multipart upload we cannot simply copy the filelike object
+            # since there is not really a mechanism in python (i.e. os.dup
+            # points to the same OS filehandle which causes concurrency
+            # issues). So instead we need to read from the fileobj and
+            # chunk the data out to seperate file-like objects in memory.
+            'data = fileobj.read(part_size)'
+            cipher_text, envelope = self.kms_encrypt(fileobj, part_size)
+            wrapped_data = six.BytesIO(cipher_text)
+            transfer_future.meta.call_args.extra_args['Metadata'] = envelope
+            read_file_chunk = ReadFileChunk(
+                fileobj=wrapped_data, chunk_size=len(data),
+                full_file_size=transfer_future.meta.size,
+                callbacks=callbacks, enable_callbacks=False
+            )
+            yield part_number, read_file_chunk
+
+    def kms_encryption(self, fileobj, amt):
+        """Encrypt a file using AES CBC mode
+
+        :type fileobj: file-like object
+        :param fileobj: a file-like object which can be read directly.
+
+        :type amt: int
+        :param amt: amount of reading
+
+        :rtype: file-like object and dict
+        :returns: 1. encrypted file-like object
+                  2. the metadata envelope
+                    metadata structure:
+                    {
+                    'x-amz-key-v2' : ciphered key,
+                    'x-amz-iv' : ciphered iv,
+                    'x-amz-cek-alg' : 'AES/CBC/PKCS5Padding',
+                    'x-amz-wrap-alg' : 'kms',
+                    'x-amz-matdesc' : kms encryption context,
+                    'x-amz-unencrypted-content-length': strlen
+                    }
+        """
+        # self._fileobj=fileobj
+        # self._kms_key_id=kms_key_id
+        # self._kms_context=kms_context
+        # self._kmsclient=kmsclient
+        if self._kmsclient is None:
+            raise ValueError("No kms client")
+
+        if self._kms_key_id is None:
+            response = self._kmsclient.create_key(Description='s3transfer')
+            self._kms_key_id = response['KeyMetadata']['KeyId']
+            self._kms_context = {"kms_cmk_id": self._kms_key_id}
+        if self._kms_context is None:
+            self._kms_context = {}
+
+        key = self._key
+        iv = self._iv
+
+        response2 = self._kmsclient.encrypt(
+            KeyId=self._kms_key_id,
+            Plaintext=self._key,
+            EncryptionContext=self._kms_context
+        )
+
+        encrypted_key = response2['CiphertextBlob']
+
+        read_data = fileobj.read(amt)  # read_data must be str type
+        if isinstance(read_data, bytes):
+            read_data = read_data.decode('UTF-8')
+        real_len = len(read_data)
+
+        # padding
+        backend = default_backend()
+        padder = padding.PKCS7(128).padder()
+        padded_data = padder.update(read_data.encode('UTF-8'))
+        padded_data += padder.finalize()
+
+        # encrypt the data read from file
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+        cipher_text = encryptor.update(padded_data) + encryptor.finalize()
+        envelope = {
+            'x-amz-key-v2': base64.b64encode(encrypted_key).decode('UTF-8'),
+            'x-amz-iv': base64.b64encode(iv).decode('UTF-8'),
+            'x-amz-cek-alg': 'AES/CBC/PKCS5Padding',
+            'x-amz-wrap-alg': 'kms',
+            'x-amz-matdesc': json.dumps(self._kms_context),
+            'x-amz-unencrypted-content-length': str(real_len)
+        }
+
+        return [cipher_text, envelope]
 
 class UploadSubmissionTask(SubmissionTask):
     """Task for submitting tasks to execute an upload"""
