@@ -11,7 +11,15 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import math
+import base64
+import json
 import os
+import sys
+
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from botocore.compat import six
 
@@ -226,7 +234,7 @@ class UploadEncryptionManager(UploadSeekableInputManager):
     def __init__(self, osutil, userkey=None, kmsclient=None, kms_key_id=None, \
                 kms_context=None, enc_config=None):
         self._osutil = osutil
-        self.create_key_iv
+        self.create_key_iv()
         self._userkey = userkey
         self._kmsclient = kmsclient
         self._kms_key_id = kms_key_id
@@ -264,8 +272,8 @@ class UploadEncryptionManager(UploadSeekableInputManager):
         transfer_future.meta.call_args.extra_args['Metadata'] = envelope
         wrapped_data = six.BytesIO(cipher_text)
         return ReadFileChunk(
-            fileobj=wrapped_data, chunk_size=transfer_size,
-            full_file_size=transfer_size, callbacks=callbacks,
+            fileobj=wrapped_data, chunk_size=16-transfer_size%16+transfer_size,
+            full_file_size=16-transfer_size%16+transfer_size, callbacks=callbacks,
             enable_callbacks=False
         )
 
@@ -286,14 +294,17 @@ class UploadEncryptionManager(UploadSeekableInputManager):
             cipher_text, envelope = self.kms_encrypt(fileobj, part_size)
             wrapped_data = six.BytesIO(cipher_text)
             transfer_future.meta.call_args.extra_args['Metadata'] = envelope
+            new_part_size=16-part_size%16+part_size # after encryption the size changes
+            last_chunk_size = transfer_future.meta.size-(num_parts-1)*part_size
+            total_size = new_part_size * (num_parts-1) + 16-last_chunk_size%16+last_chunk_size 
             read_file_chunk = ReadFileChunk(
-                fileobj=wrapped_data, chunk_size=len(data),
-                full_file_size=transfer_future.meta.size,
+                fileobj=wrapped_data, chunk_size=new_part_size,
+                full_file_size=total_size,
                 callbacks=callbacks, enable_callbacks=False
             )
             yield part_number, read_file_chunk
 
-    def kms_encryption(self, fileobj, amt):
+    def kms_encrypt(self, fileobj, amt):
         """Encrypt a file using AES CBC mode
 
         :type fileobj: file-like object

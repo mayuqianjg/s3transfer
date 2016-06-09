@@ -13,8 +13,13 @@
 import os
 import tempfile
 import shutil
-
+import json
+import boto3
 import mock
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from tests import BaseTaskTest
 from tests import BaseSubmissionTaskTest
@@ -24,6 +29,7 @@ from s3transfer.manager import TransferConfig
 from s3transfer.upload import get_upload_input_manager_cls
 from s3transfer.upload import UploadFilenameInputManager
 from s3transfer.upload import UploadSeekableInputManager
+from s3transfer.upload import UploadEncryptionManager
 from s3transfer.upload import UploadSubmissionTask
 from s3transfer.upload import PutObjectTask
 from s3transfer.upload import UploadPartTask
@@ -190,6 +196,81 @@ class TestUploadSeekableInputManager(TestUploadFilenameInputManager):
             fileobj=self.fileobj, subscribers=self.subscribers)
         self.future = self.get_transfer_future(self.call_args)
 
+class TestUploadEncryptionManager(TestUploadSeekableInputManager):
+    def setUp(self):
+        super(TestUploadEncryptionManager, self).setUp()
+        client = boto3.client('kms')        
+        self.upload_input_manager = UploadEncryptionManager(self.osutil,
+                                                            kmsclient=client)
+        self.fileobj = open(self.filename, 'rb')
+        self.addCleanup(self.fileobj.close)
+        self.call_args = CallArgs(
+            fileobj=self.fileobj, subscribers=self.subscribers,extra_args={})
+        self.future = self.get_transfer_future(self.call_args)
+
+    def test_provide_transfer_size(self):
+        self.upload_input_manager.provide_transfer_size(self.future)
+        # The provided file size should be equal to size of the contents of
+        # the file.
+        self.assertEqual(self.future.meta.size, len(self.content)+16-len(self.content)%16)
+
+    def test_get_put_object_body(self):
+        self.future.meta.provide_transfer_size(len(self.content))
+        read_file_chunk = self.upload_input_manager.get_put_object_body(
+            self.future)
+        read_file_chunk.enable_callback()
+        # The file-like object provided back should be the same as the content
+        # of the file.
+        self.content=self.encrypt(self.content,self.upload_input_manager._key,self.upload_input_manager._iv)
+        self.assertEqual(read_file_chunk.read(), self.content)
+        # The file-like object should also have been wrapped with the
+        # on_queued callbacks to track the amount of bytes being transferred.
+        self.assertEqual(
+            self.recording_subscriber.calculate_bytes_seen(),
+            len(self.content))
+
+    def encrypt(self,plaintext,key,iv):
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+        padder = padding.PKCS7(128).padder()
+        padded_data = padder.update(plaintext) + padder.finalize()
+        cipher_text = encryptor.update(padded_data) + encryptor.finalize()
+        return cipher_text
+
+    def test_yield_upload_part_bodies(self):
+        # Adjust the chunk size to something more grainular for testing.
+        self.config.multipart_chunksize = 4
+        self.future.meta.provide_transfer_size(len(self.content))
+
+        # Get an iterator that will yield all of the bodies and their
+        # respective part number.
+        part_iterator = self.upload_input_manager.yield_upload_part_bodies(
+            self.future, self.config)
+        expected_part_number = 1
+        for part_number, read_file_chunk in part_iterator:
+            # Ensure that the part number is as expected
+            self.assertEqual(part_number, expected_part_number)
+            read_file_chunk.enable_callback()
+            # Ensure that the body is correct for that part.
+            temp=self.encrypt(self._get_expected_body_for_part(part_number),
+                            self.upload_input_manager._key,self.upload_input_manager._iv
+                            )
+           
+            self.assertEqual(
+                read_file_chunk.read(),
+                temp)
+            expected_part_number += 1
+
+        # All of the file-like object should also have been wrapped with the
+        # on_queued callbacks to track the amount of bytes being transferred.
+        parts = expected_part_number-1
+        each_chunk_size=self.config.multipart_chunksize+16-self.config.multipart_chunksize%16
+        last_chunk_size = len(self.content)-(parts-1)*self.config.multipart_chunksize
+        
+        total_size = each_chunk_size*(parts-1) + 16-last_chunk_size%16+last_chunk_size
+        self.assertEqual(
+            self.recording_subscriber.calculate_bytes_seen(),
+            total_size)
 
 class TestUploadSubmissionTask(BaseSubmissionTaskTest):
     def setUp(self):
