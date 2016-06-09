@@ -139,8 +139,8 @@ class TransferManager(object):
         'MetadataDirective'
     ]
 
-    def __init__(self, client, config=None, \
-                userkey=None, kmsclient=None, kms_key_id=None, \
+    def __init__(self, client, config=None, 
+                userkey=None, kmsclient=None, kms_key_id=None, 
                 kms_context=None, enc_config=None):
         """A transfer manager interface for Amazon S3
 
