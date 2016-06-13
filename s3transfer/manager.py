@@ -10,14 +10,7 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
-import base64
-import json
-import os
 
-
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from s3transfer.utils import unique_id
 from s3transfer.utils import get_callbacks
@@ -96,6 +89,41 @@ class TransferConfig(object):
         self.max_io_queue_size = max_io_queue_size
         self.num_download_attempts = num_download_attempts
 
+class EncryptionTransferConfig(object):
+    """Configurations for the encryption mangager"""
+    def __init__(self,
+                 multipart_threshold=8 * MB,
+                 multipart_chunksize=8 * MB,
+                 max_request_concurrency=10,
+                 max_submission_concurrency=5,
+                 max_request_queue_size=0,
+                 max_submission_queue_size=0,
+                 max_io_queue_size=1000,
+                 num_download_attempts=5,
+                 userkey=None, kmsclient=None, kms_key_id=None, 
+                 kms_context=None, enc_config=None
+                 ):
+        
+        self.multipart_threshold = multipart_threshold
+        self.multipart_chunksize = multipart_chunksize
+        self.max_request_concurrency = max_request_concurrency
+        self.max_submission_concurrency = max_submission_concurrency
+        self.max_request_queue_size = max_request_queue_size
+        self.max_submission_queue_size = max_submission_queue_size
+        self.max_io_queue_size = max_io_queue_size
+        self.num_download_attempts = num_download_attempts
+
+        # This part is the initialization for encryption or decryption
+        self.userkey = userkey
+        self.kmsclient = kmsclient
+        self.kms_key_id = kms_key_id
+        self.kms_context = kms_context
+        self.enc_config = enc_config
+        if enc_config is None:
+            self.enc_config = "AESCBC" # default
+        if kmsclient is None:
+            if not userkey or len(userkey) not in [16, 24, 32]:
+                raise ValueError("userkey error")
 
 class TransferManager(object):
     ALLOWED_DOWNLOAD_ARGS = [
@@ -139,9 +167,7 @@ class TransferManager(object):
         'MetadataDirective'
     ]
 
-    def __init__(self, client, config=None, 
-                userkey=None, kmsclient=None, kms_key_id=None, 
-                kms_context=None, enc_config=None):
+    def __init__(self, client, config=None):
         """A transfer manager interface for Amazon S3
 
         :param client: Client to be used by the manager
@@ -174,194 +200,7 @@ class TransferManager(object):
         )
         self._register_handlers()
 
-        # This part is the initialization for encryption or decryption
-        self._userkey = userkey
-        self._kmsclient = kmsclient
-        self._kms_key_id = kms_key_id
-        self._kms_context = kms_context
-        self._enc_config = enc_config
-        if enc_config is None:
-            self._enc_config = "AESCBC"
-        if kmsclient is None:
-            if not userkey or len(userkey) not in [16, 24, 32]:
-                raise ValueError("userkey error")
-
-    def kms_encryption(self, fileobj):
-        """Encrypt a file using AES CBC mode
-
-        :type fileobj: file-like object
-        :param fileobj: a file-like object which can be read directly.
-
-        :rtype: file-like object and dict
-        :returns: 1. encrypted file-like object
-                  2. the metadata envelope
-                    metadata structure:
-                    {
-                    'x-amz-key-v2' : ciphered key,
-                    'x-amz-iv' : ciphered iv,
-                    'x-amz-cek-alg' : 'AES/CBC/PKCS5Padding',
-                    'x-amz-wrap-alg' : 'kms',
-                    'x-amz-matdesc' : kms encryption context,
-                    'x-amz-unencrypted-content-length': strlen
-                    }
-        """
-        # self._fileobj=fileobj
-        # self._kms_key_id=kms_key_id
-        # self._kms_context=kms_context
-        # self._kmsclient=kmsclient
-        if self._kmsclient is None:
-            raise ValueError("No kms client")
-
-        if self._kms_key_id is None:
-            response = self._kmsclient.create_key(Description='s3transfer')
-            self._kms_key_id = response['KeyMetadata']['KeyId']
-            self._kms_context = {"kms_cmk_id": self._kms_key_id}
-        if self._kms_context is None:
-            self._kms_context = {}
-
-        key = os.urandom(32)
-        iv = os.urandom(16)
-
-        response2 = self._kmsclient.encrypt(
-            KeyId=self._kms_key_id,
-            Plaintext=key,
-            EncryptionContext=self._kms_context
-        )
-
-        encrypted_key = response2['CiphertextBlob']
-
-        read_data = fileobj.read()  # read_data must be str type
-        real_len = len(read_data)
-
-        # padding
-        backend = default_backend()
-        padder = padding.PKCS7(128).padder()
-        padded_data = padder.update(read_data.encode('UTF-8'))
-        padded_data += padder.finalize()
-
-        # encrypt the data read from file
-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-        encryptor = cipher.encryptor()
-        cipher_text = encryptor.update(padded_data) + encryptor.finalize()
-        envelope = {
-            'x-amz-key-v2': base64.b64encode(encrypted_key).decode('UTF-8'),
-            'x-amz-iv': base64.b64encode(iv).decode('UTF-8'),
-            'x-amz-cek-alg': 'AES/CBC/PKCS5Padding',
-            'x-amz-wrap-alg': 'kms',
-            'x-amz-matdesc': json.dumps(self._kms_context),
-            'x-amz-unencrypted-content-length': str(real_len)
-        }
-
-        # self._cipher_text=cipher_text
-        # self._metadata=envelope
-
-        return [cipher_text, envelope]
-
-
-    def kms_decryption(self, fileobj, envelope):
-        """Perform v2 decryption
-        :type fileobj: file-like object
-        :param fileobj: a file-like object which can be read directly.
-
-        :type envelope: dict
-        :param envelope: the metadata 
-
-        :rtype: bytes
-        :returns: decrypted bytes
-        """
-        if self._kmsclient is None:
-            raise ValueError("No kms client")
-
-        # if self._kms_context is None:
-        #    self._kms_context = {}
-        cipher_text = fileobj.read()
-
-        encrypted_key = base64.b64decode(envelope['x-amz-key-v2'].encode('UTF-8'))
-        iv = base64.b64decode(envelope['x-amz-iv'].encode('UTF-8'))
-        if self._kms_context is None:
-            self._kms_context = json.loads(envelope['x-amz-matdesc'])
-        if self._kms_key_id is None:
-            self._kms_key_id = self._kms_context['kms_cmk_id']
-
-        # Decrypt envelope key
-        kms_response = self._kmsclient.decrypt(
-            CiphertextBlob=encrypted_key,
-            EncryptionContext=self._kms_context,
-        )
-        key = kms_response['Plaintext']
-
-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-        decryptor = cipher.decryptor()
-        origin_text = decryptor.update(cipher_text) + decryptor.finalize()
-
-        # unpadding the original message
-        unpadder = padding.PKCS7(128).unpadder()
-        decrypt_text = unpadder.update(origin_text) + unpadder.finalize()
-
-        return decrypt_text
-
-
-    def decryption(self, fileobj, envelope):
-        """Perform v1 decryption
-        :type fileobj: file-like object
-        :param fileobj: a file-like object which can be read directly.
-
-        :type envelope: dict
-        :param envelope: the metadata 
-
-        :rtype: bytes
-        :returns: decrypted bytes
-        """
-        # if self._userkey is None:
-        #    raise ValueError("No userkey")
-        user_key = (self._userkey.encode('UTF-8'))
-        # if self._kms_context is None:
-        #    self._kms_context = {}
-        cipher_text = fileobj.read()
-        encrypted_key = base64.b64decode(envelope['x-amz-key'].encode('UTF-8'))
-        iv = base64.b64decode(envelope['x-amz-iv'].encode('UTF-8'))
-        message = base64.b64decode(envelope['x-amz-matdesc'].encode('UTF-8'))
-        env_cipher = Cipher(algorithms.AES(user_key),
-                            modes.ECB(),
-                            backend=default_backend()
-                            )
-        decryptor_env = env_cipher.decryptor()
-        key = decryptor_env.update(encrypted_key) + decryptor_env.finalize()
-        # check whether key is valid
-        if len(key) > 32 and key[32] != 16:
-            raise ValueError("userkey incorrect")
-
-        key = key[0:32]
-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-        decryptor = cipher.decryptor()
-        origin_text = decryptor.update(cipher_text) + decryptor.finalize()
-
-        # unpadding the original message
-        unpadder = padding.PKCS7(128).unpadder()
-        decrypt_text = unpadder.update(origin_text) + unpadder.finalize()
-
-        return decrypt_text
-
-
-    def perform_decryption(self, fileobj, envelope):
-        """Decide whether it is v1 or v2 encryption and do decryption
-
-        :type fileobj: a file-like object
-        :param fileobj: an object can be read directly
-
-        :type envelope: dict
-        :param envelope: The envelope contains the encryption info.
-
-        :rtype: bytes
-        :returns: decrypted message
-        """
-
-        if 'x-amz-key-v2' in envelope:
-            plaintext = self.kms_decryption(fileobj, envelope)
-        if 'x-amz-key' in envelope:
-            plaintext = self.decryption(fileobj, envelope)
-        return plaintext
-
+    
     def upload(self, fileobj, bucket, key, extra_args=None, subscribers=None):
         """Uploads a file to S3
 

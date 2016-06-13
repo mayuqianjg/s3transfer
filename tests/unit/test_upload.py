@@ -26,6 +26,7 @@ from tests import BaseSubmissionTaskTest
 from tests import FileSizeProvider
 from tests import RecordingSubscriber
 from s3transfer.manager import TransferConfig
+from s3transfer.manager import EncryptionTransferConfig
 from s3transfer.upload import get_upload_input_manager_cls
 from s3transfer.upload import UploadFilenameInputManager
 from s3transfer.upload import UploadSeekableInputManager
@@ -77,17 +78,28 @@ class TestGetUploadManagerClsTest(BaseUploadTest):
     def test_for_filename(self):
         call_args = CallArgs(fileobj=self.filename)
         future = self.get_transfer_future(call_args)
+        config = TransferConfig()
         # Ensure the correct class was returned for filenames
         self.assertIs(
-            get_upload_input_manager_cls(future), UploadFilenameInputManager)
+            get_upload_input_manager_cls(future, config), UploadFilenameInputManager)
 
     def test_for_seekable(self):
         with open(self.filename, 'rb') as f:
             call_args = CallArgs(fileobj=f)
             future = self.get_transfer_future(call_args)
+            config = TransferConfig()
             self.assertIs(
-                get_upload_input_manager_cls(future),
+                get_upload_input_manager_cls(future, config),
                 UploadSeekableInputManager)
+
+    def test_for_encrypt_seekable(self):
+        with open(self.filename, 'rb') as f:
+            call_args = CallArgs(fileobj=f)
+            future = self.get_transfer_future(call_args)
+            config = EncryptionTransferConfig(userkey='1234567890123456')
+            self.assertIs(
+                get_upload_input_manager_cls(future, config),
+                UploadEncryptionManager)
 
 
 class BaseUploadInputManagerTest(BaseUploadTest):
@@ -113,7 +125,7 @@ class BaseUploadInputManagerTest(BaseUploadTest):
 class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
     def setUp(self):
         super(TestUploadFilenameInputManager, self).setUp()
-        self.upload_input_manager = UploadFilenameInputManager(self.osutil)
+        self.upload_input_manager = UploadFilenameInputManager(self.osutil, self.config)
         self.call_args = CallArgs(
             fileobj=self.filename, subscribers=self.subscribers)
         self.future = self.get_transfer_future(self.call_args)
@@ -121,7 +133,7 @@ class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
     def test_is_compatible(self):
         self.assertTrue(
             self.upload_input_manager.is_compatible(
-                self.future.meta.call_args.fileobj)
+                self.future.meta.call_args.fileobj, self.config)
         )
 
     def test_provide_transfer_size(self):
@@ -189,7 +201,7 @@ class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
 class TestUploadSeekableInputManager(TestUploadFilenameInputManager):
     def setUp(self):
         super(TestUploadSeekableInputManager, self).setUp()
-        self.upload_input_manager = UploadSeekableInputManager(self.osutil)
+        self.upload_input_manager = UploadSeekableInputManager(self.osutil, self.config)
         self.fileobj = open(self.filename, 'rb')
         self.addCleanup(self.fileobj.close)
         self.call_args = CallArgs(
@@ -199,9 +211,11 @@ class TestUploadSeekableInputManager(TestUploadFilenameInputManager):
 class TestUploadEncryptionManager(TestUploadSeekableInputManager):
     def setUp(self):
         super(TestUploadEncryptionManager, self).setUp()
-        client = boto3.client('kms')        
+        client = boto3.client('kms')   
+        self.config = EncryptionTransferConfig(kmsclient=client)
+            
         self.upload_input_manager = UploadEncryptionManager(self.osutil,
-                                                            kmsclient=client)
+                                                            self.config)
         self.fileobj = open(self.filename, 'rb')
         self.addCleanup(self.fileobj.close)
         self.call_args = CallArgs(

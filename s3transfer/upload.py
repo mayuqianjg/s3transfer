@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from botocore.compat import six
 
+from s3transfer.encrypt import Encryption
 from s3transfer.tasks import Task
 from s3transfer.tasks import SubmissionTask
 from s3transfer.tasks import CreateMultipartUploadTask
@@ -31,7 +32,7 @@ from s3transfer.utils import get_callbacks
 from s3transfer.utils import ReadFileChunk
 
 
-def get_upload_input_manager_cls(transfer_future):
+def get_upload_input_manager_cls(transfer_future, config):
     """Retieves a class for managing input for an upload based on file type
 
     :type transfer_future: s3transfer.futures.TransferFuture
@@ -49,7 +50,7 @@ def get_upload_input_manager_cls(transfer_future):
 
     fileobj = transfer_future.meta.call_args.fileobj
     for upload_manager_cls in upload_manager_resolver_chain:
-        if upload_manager_cls.is_compatible(fileobj):
+        if upload_manager_cls.is_compatible(fileobj, config):
             return upload_manager_cls
     raise RuntimeError(
         'Input %s of type: %s is not supported.' % (fileobj, type(fileobj)))
@@ -139,12 +140,13 @@ class UploadInputManager(object):
 
 class UploadFilenameInputManager(UploadInputManager):
     """Upload utility for filenames"""
-    def __init__(self, osutil):
+    def __init__(self, osutil, config):
         self._osutil = osutil
+        self._config = config
 
     @classmethod
-    def is_compatible(cls, upload_source):
-        return isinstance(upload_source, six.string_types)
+    def is_compatible(cls, upload_source, config):
+        return isinstance(upload_source, six.string_types) and not (hasattr(config, 'enc_config'))
 
     def provide_transfer_size(self, transfer_future):
         transfer_future.meta.provide_transfer_size(
@@ -181,9 +183,9 @@ class UploadFilenameInputManager(UploadInputManager):
 class UploadSeekableInputManager(UploadFilenameInputManager):
     """Upload utility for am open file object"""
     @classmethod
-    def is_compatible(cls, upload_source):
+    def is_compatible(cls, upload_source, config):
         return (
-            hasattr(upload_source, 'seek') and hasattr(upload_source, 'tell')
+            hasattr(upload_source, 'seek') and hasattr(upload_source, 'tell') and not (hasattr(config, 'enc_config'))
         )
 
     def provide_transfer_size(self, transfer_future):
@@ -230,22 +232,34 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
             yield part_number, read_file_chunk
 
 class UploadEncryptionManager(UploadSeekableInputManager):
-    """Encryption utility for a known file chunk"""
-    def __init__(self, osutil, userkey=None, kmsclient=None, kms_key_id=None, \
-                kms_context=None, enc_config=None):
+    """Encryption interface for a known file chunk"""
+    def __init__(self, osutil, config):
         self._osutil = osutil
+        self._config = config
+        self.encrypt_manager = Encryption(enc_method = self._config.enc_config)
         self.create_key_iv()
-        self._userkey = userkey
-        self._kmsclient = kmsclient
-        self._kms_key_id = kms_key_id
-        self._kms_context = kms_context
-        self._enc_config = enc_config
-        if enc_config is None:
-            self._enc_config = "AESCBC"
-        if kmsclient is None:
-            if not userkey or len(userkey) not in [16, 24, 32]:
-                raise ValueError("userkey error")
 
+    @classmethod
+    def is_compatible(cls, upload_source, config):
+        return (
+            hasattr(upload_source, 'seek') and hasattr(upload_source, 'tell') and hasattr(config, 'enc_config')
+        )
+
+    def padded_length(self, start, end=None): 
+        # returns the length after padding
+        if self._config.enc_config == "AESCBC":
+            if end is not None:
+                return (math.floor((end - start)/16.0)+1) * 16 
+            else:
+            # only one parameter, 'start' stands for the length
+                return (math.floor(start/16.0)+1) * 16
+        else:
+            if end is not None:
+                return end - start
+            else:
+            # only one parameter, 'start' stands for the length
+                return start
+    
     def create_key_iv(self):
         self._key = os.urandom(32)
         self._iv = os.urandom(16)
@@ -259,7 +273,10 @@ class UploadEncryptionManager(UploadSeekableInputManager):
         fileobj.seek(0, 2)
         end_position = fileobj.tell()
         fileobj.seek(start_position)
-        length_after_enc=(math.floor((end_position - start_position)/16)+1) * 16
+
+        # calculate length 
+        length_after_enc = self.padded_length(start_position, end_position)   
+
         transfer_future.meta.provide_transfer_size(
             length_after_enc)
 
@@ -267,13 +284,13 @@ class UploadEncryptionManager(UploadSeekableInputManager):
         fileobj = transfer_future.meta.call_args.fileobj
         callbacks = get_callbacks(transfer_future, 'progress')
         transfer_size = transfer_future.meta.size
-        #data = fileobj.read(transfer_size)
-        cipher_text, envelope = self.kms_encrypt(fileobj, transfer_size)
+        
+        cipher_text, envelope = self.encrypt_manager.kms_encrypt(fileobj, transfer_size, self._config, self._key, self._iv)
         transfer_future.meta.call_args.extra_args['Metadata'] = envelope
         wrapped_data = six.BytesIO(cipher_text)
         return ReadFileChunk(
-            fileobj=wrapped_data, chunk_size=16-transfer_size%16+transfer_size,
-            full_file_size=16-transfer_size%16+transfer_size, callbacks=callbacks,
+            fileobj=wrapped_data, chunk_size=self.padded_length(transfer_size),
+            full_file_size=self.padded_length(transfer_size), callbacks=callbacks,
             enable_callbacks=False
         )
 
@@ -289,14 +306,14 @@ class UploadEncryptionManager(UploadSeekableInputManager):
             # since there is not really a mechanism in python (i.e. os.dup
             # points to the same OS filehandle which causes concurrency
             # issues). So instead we need to read from the fileobj and
-            # chunk the data out to seperate file-like objects in memory.
-            'data = fileobj.read(part_size)'
-            cipher_text, envelope = self.kms_encrypt(fileobj, part_size)
+            # encrypt them to seperate file-like objects in memory.
+           
+            cipher_text, envelope = self.encrypt_manager.kms_encrypt(fileobj, part_size, config, self._key, self._iv)
             wrapped_data = six.BytesIO(cipher_text)
             transfer_future.meta.call_args.extra_args['Metadata'] = envelope
-            new_part_size=16-part_size%16+part_size # after encryption the size changes
+            new_part_size= self.padded_length(part_size) # after encryption the size changes
             last_chunk_size = transfer_future.meta.size-(num_parts-1)*part_size
-            total_size = new_part_size * (num_parts-1) + 16-last_chunk_size%16+last_chunk_size 
+            total_size = new_part_size * (num_parts-1) + self.padded_length(last_chunk_size) 
             read_file_chunk = ReadFileChunk(
                 fileobj=wrapped_data, chunk_size=new_part_size,
                 full_file_size=total_size,
@@ -304,78 +321,7 @@ class UploadEncryptionManager(UploadSeekableInputManager):
             )
             yield part_number, read_file_chunk
 
-    def kms_encrypt(self, fileobj, amt):
-        """Encrypt a file using AES CBC mode
-
-        :type fileobj: file-like object
-        :param fileobj: a file-like object which can be read directly.
-
-        :type amt: int
-        :param amt: amount of reading
-
-        :rtype: file-like object and dict
-        :returns: 1. encrypted file-like object
-                  2. the metadata envelope
-                    metadata structure:
-                    {
-                    'x-amz-key-v2' : ciphered key,
-                    'x-amz-iv' : ciphered iv,
-                    'x-amz-cek-alg' : 'AES/CBC/PKCS5Padding',
-                    'x-amz-wrap-alg' : 'kms',
-                    'x-amz-matdesc' : kms encryption context,
-                    'x-amz-unencrypted-content-length': strlen
-                    }
-        """
-        # self._fileobj=fileobj
-        # self._kms_key_id=kms_key_id
-        # self._kms_context=kms_context
-        # self._kmsclient=kmsclient
-        if self._kmsclient is None:
-            raise ValueError("No kms client")
-
-        if self._kms_key_id is None:
-            response = self._kmsclient.create_key(Description='s3transfer')
-            self._kms_key_id = response['KeyMetadata']['KeyId']
-            self._kms_context = {"kms_cmk_id": self._kms_key_id}
-        if self._kms_context is None:
-            self._kms_context = {}
-
-        key = self._key
-        iv = self._iv
-
-        response2 = self._kmsclient.encrypt(
-            KeyId=self._kms_key_id,
-            Plaintext=self._key,
-            EncryptionContext=self._kms_context
-        )
-
-        encrypted_key = response2['CiphertextBlob']
-
-        read_data = fileobj.read(amt)  # read_data must be str type
-        if isinstance(read_data, bytes):
-            read_data = read_data.decode('UTF-8')
-        real_len = len(read_data)
-
-        # padding
-        backend = default_backend()
-        padder = padding.PKCS7(128).padder()
-        padded_data = padder.update(read_data.encode('UTF-8'))
-        padded_data += padder.finalize()
-
-        # encrypt the data read from file
-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-        encryptor = cipher.encryptor()
-        cipher_text = encryptor.update(padded_data) + encryptor.finalize()
-        envelope = {
-            'x-amz-key-v2': base64.b64encode(encrypted_key).decode('UTF-8'),
-            'x-amz-iv': base64.b64encode(iv).decode('UTF-8'),
-            'x-amz-cek-alg': 'AES/CBC/PKCS5Padding',
-            'x-amz-wrap-alg': 'kms',
-            'x-amz-matdesc': json.dumps(self._kms_context),
-            'x-amz-unencrypted-content-length': str(real_len)
-        }
-
-        return [cipher_text, envelope]
+    
 
 class UploadSubmissionTask(SubmissionTask):
     """Task for submitting tasks to execute an upload"""
@@ -408,7 +354,7 @@ class UploadSubmissionTask(SubmissionTask):
             transfer request that tasks are being submitted for
         """
         upload_input_manager = get_upload_input_manager_cls(
-            transfer_future)(osutil)
+            transfer_future, config)(osutil, config)
 
         # Determine the size if it was not provided
         if transfer_future.meta.size is None:
