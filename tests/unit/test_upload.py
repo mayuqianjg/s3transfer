@@ -11,31 +11,31 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import os
-import tempfile
 import shutil
-import json
+import tempfile
+
 import boto3
 import mock
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
-from tests import BaseTaskTest
-from tests import BaseSubmissionTaskTest
-from tests import FileSizeProvider
-from tests import RecordingSubscriber
-from s3transfer.manager import TransferConfig
 from s3transfer.manager import EncryptionTransferConfig
-from s3transfer.upload import get_upload_input_manager_cls
-from s3transfer.upload import UploadFilenameInputManager
-from s3transfer.upload import UploadSeekableInputManager
-from s3transfer.upload import UploadEncryptionManager
-from s3transfer.upload import UploadSubmissionTask
+from s3transfer.manager import TransferConfig
+from s3transfer.encrypt import Encryption
 from s3transfer.upload import PutObjectTask
+from s3transfer.upload import UploadEncryptionManager
+from s3transfer.upload import UploadFilenameInputManager
 from s3transfer.upload import UploadPartTask
+from s3transfer.upload import UploadSeekableInputManager
+from s3transfer.upload import UploadSubmissionTask
+from s3transfer.upload import get_upload_input_manager_cls
 from s3transfer.utils import CallArgs
 from s3transfer.utils import OSUtils
+from tests import BaseSubmissionTaskTest
+from tests import BaseTaskTest
+from tests import FileSizeProvider
+from tests import RecordingSubscriber
 
 
 class OSUtilsExceptionOnFileSize(OSUtils):
@@ -81,7 +81,9 @@ class TestGetUploadManagerClsTest(BaseUploadTest):
         config = TransferConfig()
         # Ensure the correct class was returned for filenames
         self.assertIs(
-            get_upload_input_manager_cls(future, config), UploadFilenameInputManager)
+            get_upload_input_manager_cls(future, config),
+            UploadFilenameInputManager
+        )
 
     def test_for_seekable(self):
         with open(self.filename, 'rb') as f:
@@ -125,7 +127,8 @@ class BaseUploadInputManagerTest(BaseUploadTest):
 class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
     def setUp(self):
         super(TestUploadFilenameInputManager, self).setUp()
-        self.upload_input_manager = UploadFilenameInputManager(self.osutil, self.config)
+        self.upload_input_manager = UploadFilenameInputManager(self.osutil,
+                                                               self.config)
         self.call_args = CallArgs(
             fileobj=self.filename, subscribers=self.subscribers)
         self.future = self.get_transfer_future(self.call_args)
@@ -201,32 +204,35 @@ class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
 class TestUploadSeekableInputManager(TestUploadFilenameInputManager):
     def setUp(self):
         super(TestUploadSeekableInputManager, self).setUp()
-        self.upload_input_manager = UploadSeekableInputManager(self.osutil, self.config)
+        self.upload_input_manager = UploadSeekableInputManager(self.osutil,
+                                                               self.config)
         self.fileobj = open(self.filename, 'rb')
         self.addCleanup(self.fileobj.close)
         self.call_args = CallArgs(
             fileobj=self.fileobj, subscribers=self.subscribers)
         self.future = self.get_transfer_future(self.call_args)
 
+
 class TestUploadEncryptionManager(TestUploadSeekableInputManager):
     def setUp(self):
         super(TestUploadEncryptionManager, self).setUp()
-        client = boto3.client('kms')   
+        client = boto3.client('kms')
         self.config = EncryptionTransferConfig(kmsclient=client)
-            
+
         self.upload_input_manager = UploadEncryptionManager(self.osutil,
                                                             self.config)
         self.fileobj = open(self.filename, 'rb')
         self.addCleanup(self.fileobj.close)
         self.call_args = CallArgs(
-            fileobj=self.fileobj, subscribers=self.subscribers,extra_args={})
+            fileobj=self.fileobj, subscribers=self.subscribers, extra_args={})
         self.future = self.get_transfer_future(self.call_args)
 
     def test_provide_transfer_size(self):
         self.upload_input_manager.provide_transfer_size(self.future)
         # The provided file size should be equal to size of the contents of
         # the file.
-        self.assertEqual(self.future.meta.size, len(self.content)+16-len(self.content)%16)
+        self.assertEqual(self.future.meta.size,
+                         len(self.content) + 16 - len(self.content) % 16)
 
     def test_get_put_object_body(self):
         self.future.meta.provide_transfer_size(len(self.content))
@@ -235,7 +241,10 @@ class TestUploadEncryptionManager(TestUploadSeekableInputManager):
         read_file_chunk.enable_callback()
         # The file-like object provided back should be the same as the content
         # of the file.
-        self.content=self.encrypt(self.content,self.upload_input_manager._key,self.upload_input_manager._iv)
+        self.content = self.encrypt(self.content,
+                                    self.upload_input_manager.encrypt_manager._key,
+                                    self.upload_input_manager.encrypt_manager._iv
+                                    )
         self.assertEqual(read_file_chunk.read(), self.content)
         # The file-like object should also have been wrapped with the
         # on_queued callbacks to track the amount of bytes being transferred.
@@ -243,8 +252,9 @@ class TestUploadEncryptionManager(TestUploadSeekableInputManager):
             self.recording_subscriber.calculate_bytes_seen(),
             len(self.content))
 
-    def encrypt(self,plaintext,key,iv):
-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    def encrypt(self, plaintext, key, iv):
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv),
+                        backend=default_backend())
         encryptor = cipher.encryptor()
         padder = padding.PKCS7(128).padder()
         padded_data = padder.update(plaintext) + padder.finalize()
@@ -266,10 +276,11 @@ class TestUploadEncryptionManager(TestUploadSeekableInputManager):
             self.assertEqual(part_number, expected_part_number)
             read_file_chunk.enable_callback()
             # Ensure that the body is correct for that part.
-            temp=self.encrypt(self._get_expected_body_for_part(part_number),
-                            self.upload_input_manager._key,self.upload_input_manager._iv
-                            )
-           
+            temp = self.encrypt(self._get_expected_body_for_part(part_number),
+                                self.upload_input_manager.encrypt_manager._key,
+                                self.upload_input_manager.encrypt_manager._iv
+                                )
+
             self.assertEqual(
                 read_file_chunk.read(),
                 temp)
@@ -277,14 +288,18 @@ class TestUploadEncryptionManager(TestUploadSeekableInputManager):
 
         # All of the file-like object should also have been wrapped with the
         # on_queued callbacks to track the amount of bytes being transferred.
-        parts = expected_part_number-1
-        each_chunk_size=self.config.multipart_chunksize+16-self.config.multipart_chunksize%16
-        last_chunk_size = len(self.content)-(parts-1)*self.config.multipart_chunksize
-        
-        total_size = each_chunk_size*(parts-1) + 16-last_chunk_size%16+last_chunk_size
+        parts = expected_part_number - 1
+        each_chunk_size = self.config.multipart_chunksize + \
+                          16 - self.config.multipart_chunksize % 16
+        last_chunk_size = len(self.content) - \
+                          (parts - 1) * self.config.multipart_chunksize
+
+        total_size = each_chunk_size * (parts - 1) + \
+                     16 - last_chunk_size % 16 + last_chunk_size
         self.assertEqual(
             self.recording_subscriber.calculate_bytes_seen(),
             total_size)
+
 
 class TestUploadSubmissionTask(BaseSubmissionTaskTest):
     def setUp(self):

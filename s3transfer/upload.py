@@ -11,25 +11,15 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import math
-import base64
-import json
-import os
-import sys
-
-
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from botocore.compat import six
-
 from s3transfer.encrypt import Encryption
-from s3transfer.tasks import Task
-from s3transfer.tasks import SubmissionTask
-from s3transfer.tasks import CreateMultipartUploadTask
 from s3transfer.tasks import CompleteMultipartUploadTask
-from s3transfer.utils import get_callbacks
+from s3transfer.tasks import CreateMultipartUploadTask
+from s3transfer.tasks import SubmissionTask
+from s3transfer.tasks import Task
 from s3transfer.utils import ReadFileChunk
+from s3transfer.utils import get_callbacks
 
 
 def get_upload_input_manager_cls(transfer_future, config):
@@ -71,6 +61,7 @@ class UploadInputManager(object):
     that may be accepted. All implementations must subclass and override
     public methods from this class.
     """
+
     @classmethod
     def is_compatible(cls, upload_source):
         """Determines if the source for the upload is compatible with manager
@@ -140,13 +131,15 @@ class UploadInputManager(object):
 
 class UploadFilenameInputManager(UploadInputManager):
     """Upload utility for filenames"""
+
     def __init__(self, osutil, config):
         self._osutil = osutil
         self._config = config
 
     @classmethod
     def is_compatible(cls, upload_source, config):
-        return isinstance(upload_source, six.string_types) and not (hasattr(config, 'enc_config'))
+        return (isinstance(upload_source, six.string_types) and
+                not (hasattr(config, 'enc_config')))
 
     def provide_transfer_size(self, transfer_future):
         transfer_future.meta.provide_transfer_size(
@@ -182,10 +175,13 @@ class UploadFilenameInputManager(UploadInputManager):
 
 class UploadSeekableInputManager(UploadFilenameInputManager):
     """Upload utility for am open file object"""
+
     @classmethod
     def is_compatible(cls, upload_source, config):
         return (
-            hasattr(upload_source, 'seek') and hasattr(upload_source, 'tell') and not (hasattr(config, 'enc_config'))
+            hasattr(upload_source, 'seek') and
+            hasattr(upload_source, 'tell') and
+            not (hasattr(config, 'enc_config'))
         )
 
     def provide_transfer_size(self, transfer_future):
@@ -231,38 +227,37 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
             )
             yield part_number, read_file_chunk
 
+
 class UploadEncryptionManager(UploadSeekableInputManager):
     """Encryption interface for a known file chunk"""
+
     def __init__(self, osutil, config):
         self._osutil = osutil
         self._config = config
-        self.encrypt_manager = Encryption(enc_method = self._config.enc_config)
-        self.create_key_iv()
+        self.encrypt_manager = Encryption(enc_method=self._config.enc_config)
 
     @classmethod
     def is_compatible(cls, upload_source, config):
         return (
-            hasattr(upload_source, 'seek') and hasattr(upload_source, 'tell') and hasattr(config, 'enc_config')
+            hasattr(upload_source, 'seek') and
+            hasattr(upload_source, 'tell') and
+            hasattr(config, 'enc_config')
         )
 
-    def padded_length(self, start, end=None): 
+    def padded_length(self, start, end=None):
         # returns the length after padding
         if self._config.enc_config == "AESCBC":
             if end is not None:
-                return (math.floor((end - start)/16.0)+1) * 16 
+                return (math.floor((end - start) / 16.0) + 1) * 16
             else:
-            # only one parameter, 'start' stands for the length
-                return (math.floor(start/16.0)+1) * 16
+                # only one parameter, 'start' stands for the length
+                return (math.floor(start / 16.0) + 1) * 16
         else:
             if end is not None:
                 return end - start
             else:
-            # only one parameter, 'start' stands for the length
+                # only one parameter, 'start' stands for the length
                 return start
-    
-    def create_key_iv(self):
-        self._key = os.urandom(32)
-        self._iv = os.urandom(16)
 
     def provide_transfer_size(self, transfer_future):
         fileobj = transfer_future.meta.call_args.fileobj
@@ -274,9 +269,8 @@ class UploadEncryptionManager(UploadSeekableInputManager):
         end_position = fileobj.tell()
         fileobj.seek(start_position)
 
-        # calculate length 
-        length_after_enc = self.padded_length(start_position, end_position)   
-
+        # calculate length
+        length_after_enc = self.padded_length(start_position, end_position)
         transfer_future.meta.provide_transfer_size(
             length_after_enc)
 
@@ -284,16 +278,17 @@ class UploadEncryptionManager(UploadSeekableInputManager):
         fileobj = transfer_future.meta.call_args.fileobj
         callbacks = get_callbacks(transfer_future, 'progress')
         transfer_size = transfer_future.meta.size
-        
-        cipher_text, envelope = self.encrypt_manager.kms_encrypt(fileobj, transfer_size, self._config, self._key, self._iv)
+
+        cipher_text, envelope = self.encrypt_manager.encrypt(
+            fileobj, transfer_size,
+            self._config)
         transfer_future.meta.call_args.extra_args['Metadata'] = envelope
         wrapped_data = six.BytesIO(cipher_text)
         return ReadFileChunk(
             fileobj=wrapped_data, chunk_size=self.padded_length(transfer_size),
-            full_file_size=self.padded_length(transfer_size), callbacks=callbacks,
-            enable_callbacks=False
+            full_file_size=self.padded_length(transfer_size),
+            callbacks=callbacks, enable_callbacks=False
         )
-
 
     def yield_upload_part_bodies(self, transfer_future, config):
         part_size = config.multipart_chunksize
@@ -307,13 +302,17 @@ class UploadEncryptionManager(UploadSeekableInputManager):
             # points to the same OS filehandle which causes concurrency
             # issues). So instead we need to read from the fileobj and
             # encrypt them to seperate file-like objects in memory.
-           
-            cipher_text, envelope = self.encrypt_manager.kms_encrypt(fileobj, part_size, config, self._key, self._iv)
+
+            cipher_text, envelope = self.encrypt_manager.encrypt(
+                fileobj, part_size, config
+            )
             wrapped_data = six.BytesIO(cipher_text)
             transfer_future.meta.call_args.extra_args['Metadata'] = envelope
-            new_part_size= self.padded_length(part_size) # after encryption the size changes
-            last_chunk_size = transfer_future.meta.size-(num_parts-1)*part_size
-            total_size = new_part_size * (num_parts-1) + self.padded_length(last_chunk_size) 
+            new_part_size = self.padded_length(part_size)
+            last_chunk_size = transfer_future.meta.size - \
+                              (num_parts - 1) * part_size
+            total_size = new_part_size * (num_parts - 1) + \
+                         self.padded_length(last_chunk_size)
             read_file_chunk = ReadFileChunk(
                 fileobj=wrapped_data, chunk_size=new_part_size,
                 full_file_size=total_size,
@@ -321,7 +320,6 @@ class UploadEncryptionManager(UploadSeekableInputManager):
             )
             yield part_number, read_file_chunk
 
-    
 
 class UploadSubmissionTask(SubmissionTask):
     """Task for submitting tasks to execute an upload"""
@@ -469,6 +467,7 @@ class UploadSubmissionTask(SubmissionTask):
 
 class PutObjectTask(Task):
     """Task to do a nonmultipart upload"""
+
     def _main(self, client, fileobj, bucket, key, extra_args):
         """
         :param client: The client to use when calling PutObject
@@ -484,6 +483,7 @@ class PutObjectTask(Task):
 
 class UploadPartTask(Task):
     """Task to upload a part in a multipart upload"""
+
     def _main(self, client, fileobj, bucket, key, upload_id, part_number,
               extra_args):
         """
