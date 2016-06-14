@@ -11,27 +11,27 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 
-from s3transfer.encrypt import find_enc_manager,kms_enc_manager,aesecb_enc_manager,aescbc_enc_manager
-from s3transfer.utils import unique_id
-from s3transfer.utils import get_callbacks
-from s3transfer.utils import disable_upload_callbacks
-from s3transfer.utils import enable_upload_callbacks
-from s3transfer.utils import CallArgs
-from s3transfer.utils import OSUtils
+from s3transfer.copies import CopySubmissionTask
+from s3transfer.download import DownloadSubmissionTask
+from s3transfer.encrypt import find_enc_manager
 from s3transfer.futures import BoundedExecutor
 from s3transfer.futures import get_transfer_future_with_components
-from s3transfer.download import DownloadSubmissionTask
 from s3transfer.upload import UploadSubmissionTask
-from s3transfer.copies import CopySubmissionTask
-
+from s3transfer.utils import CallArgs
+from s3transfer.utils import OSUtils
+from s3transfer.utils import disable_upload_callbacks
+from s3transfer.utils import enable_upload_callbacks
+from s3transfer.utils import get_callbacks
+from s3transfer.utils import unique_id
 
 MB = 1024 * 1024
 
+
 class EncryptionConfig(object):
-    def __init__(self, userkey=None,kmsclient=None,
-                kms_key_id =None, kms_context =None,
-                env_encryptor=None, body_encryptor=None
-                ):
+    def __init__(self, userkey=None, kmsclient=None,
+                 kms_key_id=None, kms_context=None,
+                 env_encryptor=None, body_encryptor=None
+                 ):
         # This part is the initialization for encryption or decryption
         # e.g.
         # kms_context={}
@@ -45,7 +45,6 @@ class EncryptionConfig(object):
         self.body_encryptor = body_encryptor
         if self.env_encryptor is not None:
             self.env_enc_manager, self.body_enc_manager = find_enc_manager(self)
-        
 
 
 class TransferConfig(object):
@@ -110,6 +109,7 @@ class TransferConfig(object):
         self.max_io_queue_size = max_io_queue_size
         self.num_download_attempts = num_download_attempts
         self.enc_config = enc_config
+
 
 class TransferManager(object):
     ALLOWED_DOWNLOAD_ARGS = [
@@ -186,7 +186,6 @@ class TransferManager(object):
         )
         self._register_handlers()
 
-    
     def upload(self, fileobj, bucket, key, extra_args=None, subscribers=None):
         """Uploads a file to S3
 
@@ -214,11 +213,11 @@ class TransferManager(object):
         """
         if extra_args is None:
             extra_args = {}
-        if self._config.enc_config.body_enc_manager is not None:
+        if self._config.enc_config.env_encryptor is not None:
             envelope = self._config.enc_config.env_enc_manager.get_envelope(
                 self._config.enc_config.body_enc_manager._key,
                 self._config.enc_config.body_enc_manager._iv)
-            extra_args['Metadata'] = envelope # equal or update?
+            extra_args['Metadata'] = envelope  # equal or update?
         if subscribers is None:
             subscribers = []
         self._validate_all_known_args(extra_args, self.ALLOWED_UPLOAD_ARGS)
@@ -382,4 +381,3 @@ class TransferManager(object):
         self._submission_executor.shutdown()
         self._request_executor.shutdown()
         self._io_executor.shutdown()
-

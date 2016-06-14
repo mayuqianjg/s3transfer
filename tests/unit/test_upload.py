@@ -16,14 +16,13 @@ import tempfile
 
 import boto3
 import mock
-
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from s3transfer.manager import EncryptionConfig
 from s3transfer.manager import TransferConfig
-from s3transfer.upload import PutObjectTask
 from s3transfer.upload import FilenameEncryptionManager
+from s3transfer.upload import PutObjectTask
 from s3transfer.upload import SeekableEncryptionManager
 from s3transfer.upload import UploadFilenameInputManager
 from s3transfer.upload import UploadPartTask
@@ -94,11 +93,23 @@ class TestGetUploadManagerClsTest(BaseUploadTest):
                 get_upload_input_manager_cls(future, config),
                 UploadSeekableInputManager)
 
+    def test_for_encrypt_filename(self):
+        call_args = CallArgs(fileobj=self.filename)
+        future = self.get_transfer_future(call_args)
+        config = TransferConfig(enc_config=EncryptionConfig(
+                env_encryptor='kms', body_encryptor='aescbc'))
+        # Ensure the correct class was returned for filenames
+        self.assertIs(
+            get_upload_input_manager_cls(future, config),
+            FilenameEncryptionManager
+        )
+
     def test_for_encrypt_seekable(self):
         with open(self.filename, 'rb') as f:
             call_args = CallArgs(fileobj=f)
             future = self.get_transfer_future(call_args)
-            config = TransferConfig(enc_config=EncryptionConfig(env_encryptor='kms',body_encryptor='aescbc'))
+            config = TransferConfig(enc_config=EncryptionConfig(
+                    env_encryptor='kms', body_encryptor='aescbc'))
             self.assertIs(
                 get_upload_input_manager_cls(future, config),
                 SeekableEncryptionManager)
@@ -217,12 +228,13 @@ class TestSeekableEncryptionManager(TestUploadSeekableInputManager):
     def setUp(self):
         super(TestSeekableEncryptionManager, self).setUp()
         client = boto3.client('kms')
-        self.config = TransferConfig(enc_config=EncryptionConfig(env_encryptor='kms',body_encryptor='aescbc',
-                                                                kmsclient=client)
-                                    )
+        self.config = TransferConfig(enc_config=EncryptionConfig(
+                    env_encryptor='kms', body_encryptor='aescbc',
+                    kmsclient=client)
+                    )
 
         self.upload_input_manager = SeekableEncryptionManager(self.osutil,
-                                                            self.config)
+                                                              self.config)
         self.fileobj = open(self.filename, 'rb')
         self.addCleanup(self.fileobj.close)
         self.call_args = CallArgs(
@@ -231,10 +243,11 @@ class TestSeekableEncryptionManager(TestUploadSeekableInputManager):
 
     def test_provide_transfer_size(self):
         self.upload_input_manager.provide_transfer_size(self.future)
-        # The provided file size should be equal to size of the contents of
-        # the file.
+        # The provided file size should be equal to the padded size of the
+        # contents of the file.
         self.assertEqual(self.future.meta.size,
-                         len(self.content) + 16 - len(self.content) % 16)
+            self.config.enc_config.body_enc_manager.calculate_size(
+                len(self.content)))
 
     def test_get_put_object_body(self):
         self.future.meta.provide_transfer_size(len(self.content))
@@ -244,9 +257,9 @@ class TestSeekableEncryptionManager(TestUploadSeekableInputManager):
         # The file-like object provided back should be the same as the content
         # of the file.
         self.content = self.encrypt(self.content,
-                                    self.upload_input_manager._config.enc_config.body_enc_manager._key,
-                                    self.upload_input_manager._config.enc_config.body_enc_manager._iv
-                                    )
+            self.upload_input_manager._config.enc_config.body_enc_manager._key,
+            self.upload_input_manager._config.enc_config.body_enc_manager._iv
+            )
         self.assertEqual(read_file_chunk.read(), self.content)
         # The file-like object should also have been wrapped with the
         # on_queued callbacks to track the amount of bytes being transferred.
@@ -279,9 +292,9 @@ class TestSeekableEncryptionManager(TestUploadSeekableInputManager):
             read_file_chunk.enable_callback()
             # Ensure that the body is correct for that part.
             temp = self.encrypt(self._get_expected_body_for_part(part_number),
-                                self.upload_input_manager._config.enc_config.body_enc_manager._key,
-                                self.upload_input_manager._config.enc_config.body_enc_manager._iv
-                                )
+                self.upload_input_manager._config.enc_config.body_enc_manager._key,
+                self.upload_input_manager._config.enc_config.body_enc_manager._iv
+                )
 
             self.assertEqual(
                 read_file_chunk.read(),
@@ -301,6 +314,20 @@ class TestSeekableEncryptionManager(TestUploadSeekableInputManager):
         self.assertEqual(
             self.recording_subscriber.calculate_bytes_seen(),
             total_size)
+
+
+class TestFilenameEncryptionManager(TestSeekableEncryptionManager):
+    def setUp(self):
+        super(TestFilenameEncryptionManager, self).setUp()
+        client = boto3.client('kms')
+        self.config = TransferConfig(enc_config=EncryptionConfig(
+            env_encryptor='kms', body_encryptor='aescbc',
+            kmsclient=client))
+        self.upload_input_manager = FilenameEncryptionManager(self.osutil,
+                                                              self.config)
+        self.call_args = CallArgs(
+            fileobj=self.filename, subscribers=self.subscribers)
+        self.future = self.get_transfer_future(self.call_args)
 
 
 class TestUploadSubmissionTask(BaseSubmissionTaskTest):
