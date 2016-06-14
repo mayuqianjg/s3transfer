@@ -20,11 +20,11 @@ import mock
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from s3transfer.manager import EncryptionTransferConfig
+from s3transfer.manager import EncryptionConfig
 from s3transfer.manager import TransferConfig
-from s3transfer.encrypt import Encryption
 from s3transfer.upload import PutObjectTask
-from s3transfer.upload import UploadEncryptionManager
+from s3transfer.upload import FilenameEncryptionManager
+from s3transfer.upload import SeekableEncryptionManager
 from s3transfer.upload import UploadFilenameInputManager
 from s3transfer.upload import UploadPartTask
 from s3transfer.upload import UploadSeekableInputManager
@@ -98,10 +98,10 @@ class TestGetUploadManagerClsTest(BaseUploadTest):
         with open(self.filename, 'rb') as f:
             call_args = CallArgs(fileobj=f)
             future = self.get_transfer_future(call_args)
-            config = EncryptionTransferConfig(userkey='1234567890123456')
+            config = TransferConfig(enc_config=EncryptionConfig(env_encryptor='kms',body_encryptor='aescbc'))
             self.assertIs(
                 get_upload_input_manager_cls(future, config),
-                UploadEncryptionManager)
+                SeekableEncryptionManager)
 
 
 class BaseUploadInputManagerTest(BaseUploadTest):
@@ -213,13 +213,15 @@ class TestUploadSeekableInputManager(TestUploadFilenameInputManager):
         self.future = self.get_transfer_future(self.call_args)
 
 
-class TestUploadEncryptionManager(TestUploadSeekableInputManager):
+class TestSeekableEncryptionManager(TestUploadSeekableInputManager):
     def setUp(self):
-        super(TestUploadEncryptionManager, self).setUp()
+        super(TestSeekableEncryptionManager, self).setUp()
         client = boto3.client('kms')
-        self.config = EncryptionTransferConfig(kmsclient=client)
+        self.config = TransferConfig(enc_config=EncryptionConfig(env_encryptor='kms',body_encryptor='aescbc',
+                                                                kmsclient=client)
+                                    )
 
-        self.upload_input_manager = UploadEncryptionManager(self.osutil,
+        self.upload_input_manager = SeekableEncryptionManager(self.osutil,
                                                             self.config)
         self.fileobj = open(self.filename, 'rb')
         self.addCleanup(self.fileobj.close)
@@ -242,8 +244,8 @@ class TestUploadEncryptionManager(TestUploadSeekableInputManager):
         # The file-like object provided back should be the same as the content
         # of the file.
         self.content = self.encrypt(self.content,
-                                    self.upload_input_manager.encrypt_manager._key,
-                                    self.upload_input_manager.encrypt_manager._iv
+                                    self.upload_input_manager._config.enc_config.body_enc_manager._key,
+                                    self.upload_input_manager._config.enc_config.body_enc_manager._iv
                                     )
         self.assertEqual(read_file_chunk.read(), self.content)
         # The file-like object should also have been wrapped with the
@@ -277,8 +279,8 @@ class TestUploadEncryptionManager(TestUploadSeekableInputManager):
             read_file_chunk.enable_callback()
             # Ensure that the body is correct for that part.
             temp = self.encrypt(self._get_expected_body_for_part(part_number),
-                                self.upload_input_manager.encrypt_manager._key,
-                                self.upload_input_manager.encrypt_manager._iv
+                                self.upload_input_manager._config.enc_config.body_enc_manager._key,
+                                self.upload_input_manager._config.enc_config.body_enc_manager._iv
                                 )
 
             self.assertEqual(

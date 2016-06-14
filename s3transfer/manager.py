@@ -11,7 +11,7 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 
-
+from s3transfer.encrypt import find_enc_manager,kms_enc_manager,aesecb_enc_manager,aescbc_enc_manager
 from s3transfer.utils import unique_id
 from s3transfer.utils import get_callbacks
 from s3transfer.utils import disable_upload_callbacks
@@ -27,6 +27,26 @@ from s3transfer.copies import CopySubmissionTask
 
 MB = 1024 * 1024
 
+class EncryptionConfig(object):
+    def __init__(self, userkey=None,kmsclient=None,
+                kms_key_id =None, kms_context =None,
+                env_encryptor=None, body_encryptor=None
+                ):
+        # This part is the initialization for encryption or decryption
+        # e.g.
+        # kms_context={}
+        # env_encryptor='kms'
+        # body_encryptor='aescbc'
+        self.userkey = userkey
+        self.kmsclient = kmsclient
+        self.kms_key_id = kms_key_id
+        self.kms_context = kms_context
+        self.env_encryptor = env_encryptor
+        self.body_encryptor = body_encryptor
+        if self.env_encryptor is not None:
+            self.env_enc_manager, self.body_enc_manager = find_enc_manager(self)
+        
+
 
 class TransferConfig(object):
     def __init__(self,
@@ -37,7 +57,8 @@ class TransferConfig(object):
                  max_request_queue_size=0,
                  max_submission_queue_size=0,
                  max_io_queue_size=1000,
-                 num_download_attempts=5):
+                 num_download_attempts=5,
+                 enc_config=EncryptionConfig()):
         """Configurations for the transfer mangager
 
         :param multipart_threshold: The threshold for which multipart
@@ -88,42 +109,7 @@ class TransferConfig(object):
         self.max_submission_queue_size = max_submission_queue_size
         self.max_io_queue_size = max_io_queue_size
         self.num_download_attempts = num_download_attempts
-
-class EncryptionTransferConfig(object):
-    """Configurations for the encryption mangager"""
-    def __init__(self,
-                 multipart_threshold=8 * MB,
-                 multipart_chunksize=8 * MB,
-                 max_request_concurrency=10,
-                 max_submission_concurrency=5,
-                 max_request_queue_size=0,
-                 max_submission_queue_size=0,
-                 max_io_queue_size=1000,
-                 num_download_attempts=5,
-                 userkey=None, kmsclient=None, kms_key_id=None, 
-                 kms_context=None, enc_config=None
-                 ):
-        
-        self.multipart_threshold = multipart_threshold
-        self.multipart_chunksize = multipart_chunksize
-        self.max_request_concurrency = max_request_concurrency
-        self.max_submission_concurrency = max_submission_concurrency
-        self.max_request_queue_size = max_request_queue_size
-        self.max_submission_queue_size = max_submission_queue_size
-        self.max_io_queue_size = max_io_queue_size
-        self.num_download_attempts = num_download_attempts
-
-        # This part is the initialization for encryption or decryption
-        self.userkey = userkey
-        self.kmsclient = kmsclient
-        self.kms_key_id = kms_key_id
-        self.kms_context = kms_context
         self.enc_config = enc_config
-        if enc_config is None:
-            self.enc_config = "AESCBC" # default
-        if kmsclient is None:
-            if not userkey or len(userkey) not in [16, 24, 32]:
-                raise ValueError("userkey error")
 
 class TransferManager(object):
     ALLOWED_DOWNLOAD_ARGS = [
@@ -228,6 +214,11 @@ class TransferManager(object):
         """
         if extra_args is None:
             extra_args = {}
+        if self._config.enc_config.body_enc_manager is not None:
+            envelope = self._config.enc_config.env_enc_manager.get_envelope(
+                self._config.enc_config.body_enc_manager._key,
+                self._config.enc_config.body_enc_manager._iv)
+            extra_args['Metadata'] = envelope # equal or update?
         if subscribers is None:
             subscribers = []
         self._validate_all_known_args(extra_args, self.ALLOWED_UPLOAD_ARGS)

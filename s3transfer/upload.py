@@ -13,7 +13,6 @@
 import math
 
 from botocore.compat import six
-from s3transfer.encrypt import Encryption
 from s3transfer.tasks import CompleteMultipartUploadTask
 from s3transfer.tasks import CreateMultipartUploadTask
 from s3transfer.tasks import SubmissionTask
@@ -33,9 +32,10 @@ def get_upload_input_manager_cls(transfer_future, config):
         input for uploads.
     """
     upload_manager_resolver_chain = [
+        FilenameEncryptionManager,
+        SeekableEncryptionManager,
         UploadFilenameInputManager,
-        UploadSeekableInputManager,
-        UploadEncryptionManager
+        UploadSeekableInputManager     
     ]
 
     fileobj = transfer_future.meta.call_args.fileobj
@@ -138,8 +138,7 @@ class UploadFilenameInputManager(UploadInputManager):
 
     @classmethod
     def is_compatible(cls, upload_source, config):
-        return (isinstance(upload_source, six.string_types) and
-                not (hasattr(config, 'enc_config')))
+        return isinstance(upload_source, six.string_types)
 
     def provide_transfer_size(self, transfer_future):
         transfer_future.meta.provide_transfer_size(
@@ -150,17 +149,26 @@ class UploadFilenameInputManager(UploadInputManager):
         return transfer_future.meta.size >= config.multipart_threshold
 
     def get_put_object_body(self, transfer_future):
-        fileobj = transfer_future.meta.call_args.fileobj
-        callbacks = get_callbacks(transfer_future, 'progress')
+        fileobj,callbacks,transfer_size=self.get_object_args(transfer_future)
         return self._osutil.open_file_chunk_reader(
-            filename=fileobj, start_byte=0, size=transfer_future.meta.size,
+            filename=fileobj, start_byte=0, size=transfer_size,
             callbacks=callbacks)
 
-    def yield_upload_part_bodies(self, transfer_future, config):
+    def get_object_args(self,transfer_future):      
+        fileobj = transfer_future.meta.call_args.fileobj
+        callbacks = get_callbacks(transfer_future, 'progress')
+        length = transfer_future.meta.size
+        return [fileobj,callbacks,length]
+
+    def get_multipart_args(self, transfer_future, config):
         part_size = config.multipart_chunksize
         num_parts = self._get_num_parts(transfer_future, part_size)
         fileobj = transfer_future.meta.call_args.fileobj
         callbacks = get_callbacks(transfer_future, 'progress')
+        return [part_size,num_parts,fileobj,callbacks]
+
+    def yield_upload_part_bodies(self, transfer_future, config):
+        part_size,num_parts,fileobj,callbacks=self.get_multipart_args(transfer_future, config)
         for part_number in range(1, num_parts + 1):
             read_file_chunk = self._osutil.open_file_chunk_reader(
                 filename=fileobj, start_byte=part_size * (part_number - 1),
@@ -172,6 +180,8 @@ class UploadFilenameInputManager(UploadInputManager):
         return int(
             math.ceil(transfer_future.meta.size / float(part_size)))
 
+    def calculate_length(self, length):
+        return length
 
 class UploadSeekableInputManager(UploadFilenameInputManager):
     """Upload utility for am open file object"""
@@ -180,10 +190,9 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
     def is_compatible(cls, upload_source, config):
         return (
             hasattr(upload_source, 'seek') and
-            hasattr(upload_source, 'tell') and
-            not (hasattr(config, 'enc_config'))
+            hasattr(upload_source, 'tell') 
         )
-
+        
     def provide_transfer_size(self, transfer_future):
         fileobj = transfer_future.meta.call_args.fileobj
         # To determine size, first determine the starting position
@@ -194,23 +203,20 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
         end_position = fileobj.tell()
         fileobj.seek(start_position)
         transfer_future.meta.provide_transfer_size(
-            end_position - start_position)
+            self.calculate_length(end_position - start_position))
 
     def get_put_object_body(self, transfer_future):
-        fileobj = transfer_future.meta.call_args.fileobj
-        callbacks = get_callbacks(transfer_future, 'progress')
-        transfer_size = transfer_future.meta.size
+        fileobj,callbacks,transfer_size=self.get_object_args(transfer_future)
         return ReadFileChunk(
             fileobj=fileobj, chunk_size=transfer_size,
             full_file_size=transfer_size, callbacks=callbacks,
             enable_callbacks=False
         )
 
+
+
     def yield_upload_part_bodies(self, transfer_future, config):
-        part_size = config.multipart_chunksize
-        num_parts = self._get_num_parts(transfer_future, part_size)
-        fileobj = transfer_future.meta.call_args.fileobj
-        callbacks = get_callbacks(transfer_future, 'progress')
+        part_size,num_parts,fileobj,callbacks=self.get_multipart_args(transfer_future, config)
         for part_number in range(1, num_parts + 1):
             # Note: It is unfortunate that in order to do a multithreaded
             # multipart upload we cannot simply copy the filelike object
@@ -227,92 +233,84 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
             )
             yield part_number, read_file_chunk
 
+class FilenameEncryptionManager(UploadFilenameInputManager):
 
-class UploadEncryptionManager(UploadSeekableInputManager):
+    @classmethod
+    def is_compatible(cls, upload_source, config):
+        return (isinstance(upload_source, six.string_types) and
+                config.enc_config.env_encryptor is not None
+               )
+    
+    def provide_transfer_size(self, transfer_future):
+        transfer_future.meta.provide_transfer_size(
+            self._config.enc_config.body_enc_manager.calculate_size(
+                self._osutil.get_file_size(
+                    transfer_future.meta.call_args.fileobj)))
+
+    def get_put_object_body(self, transfer_future):
+        fileobj,callbacks,transfer_size=self.get_object_args(transfer_future)
+        cipher_text=self._config.enc_config.body_enc_manager.encrypt(fileobj=fileobj,amt=transfer_size)   
+        obj = six.BytesIO(cipher_text)
+        transfer_size=self.calculate_length(self, transfer_size)
+        return ReadFileChunk(
+            fileobj=obj, chunk_size=transfer_size,
+            full_file_size=transfer_size, callbacks=callbacks,
+            enable_callbacks=False
+        ) 
+
+    def yield_upload_part_bodies(self, transfer_future, config):
+        part_size,num_parts,fileobj,callbacks=self.get_multipart_args(transfer_future, config)
+        for part_number in range(1, num_parts + 1):
+            encrypted_text=self._config.enc_config.body_enc_manager.encrypt(fileobj=fileobj,amt=part_size)
+            obj = six.BytesIO(encrypted_text)
+            transfer_size=self.calculate_length(self, part_size)
+            yield part_number, ReadFileChunk(
+                                fileobj=obj, chunk_size=transfer_size,
+                                full_file_size=transfer_size, callbacks=callbacks,
+                                enable_callbacks=False
+                                )   
+        
+
+    def calculate_length(self, length):
+        return self._config.enc_config.body_enc_manager.calculate_size(length)
+
+class SeekableEncryptionManager(UploadSeekableInputManager):
     """Encryption interface for a known file chunk"""
-
-    def __init__(self, osutil, config):
-        self._osutil = osutil
-        self._config = config
-        self.encrypt_manager = Encryption(enc_method=self._config.enc_config)
 
     @classmethod
     def is_compatible(cls, upload_source, config):
         return (
             hasattr(upload_source, 'seek') and
             hasattr(upload_source, 'tell') and
-            hasattr(config, 'enc_config')
+            config.enc_config.env_encryptor is not None
         )
 
-    def padded_length(self, start, end=None):
-        # returns the length after padding
-        if self._config.enc_config == "AESCBC":
-            if end is not None:
-                return (math.floor((end - start) / 16.0) + 1) * 16
-            else:
-                # only one parameter, 'start' stands for the length
-                return (math.floor(start / 16.0) + 1) * 16
-        else:
-            if end is not None:
-                return end - start
-            else:
-                # only one parameter, 'start' stands for the length
-                return start
 
-    def provide_transfer_size(self, transfer_future):
-        fileobj = transfer_future.meta.call_args.fileobj
-        # To determine size, first determine the starting position
-        # Seek to the end and then find the difference in the length
-        # between the end and start positions.
-        start_position = fileobj.tell()
-        fileobj.seek(0, 2)
-        end_position = fileobj.tell()
-        fileobj.seek(start_position)
 
-        # calculate length
-        length_after_enc = self.padded_length(start_position, end_position)
-        transfer_future.meta.provide_transfer_size(
-            length_after_enc)
+    def calculate_length(self, length):
+        return self._config.enc_config.body_enc_manager.calculate_size(length)
 
     def get_put_object_body(self, transfer_future):
-        fileobj = transfer_future.meta.call_args.fileobj
-        callbacks = get_callbacks(transfer_future, 'progress')
-        transfer_size = transfer_future.meta.size
-
-        cipher_text, envelope = self.encrypt_manager.encrypt(
-            fileobj, transfer_size,
-            self._config)
-        transfer_future.meta.call_args.extra_args['Metadata'] = envelope
+        fileobj,callbacks,transfer_size=self.get_object_args(transfer_future)
+        cipher_text=self._config.enc_config.body_enc_manager.encrypt(fileobj=fileobj,amt=transfer_size)     
         wrapped_data = six.BytesIO(cipher_text)
         return ReadFileChunk(
-            fileobj=wrapped_data, chunk_size=self.padded_length(transfer_size),
-            full_file_size=self.padded_length(transfer_size),
+            fileobj=wrapped_data, 
+            chunk_size=self.calculate_length(transfer_size),
+            full_file_size=self.calculate_length(transfer_size),
             callbacks=callbacks, enable_callbacks=False
         )
-
+    
     def yield_upload_part_bodies(self, transfer_future, config):
-        part_size = config.multipart_chunksize
-        num_parts = self._get_num_parts(transfer_future, part_size)
-        fileobj = transfer_future.meta.call_args.fileobj
-        callbacks = get_callbacks(transfer_future, 'progress')
+        part_size,num_parts,fileobj,callbacks=self.get_multipart_args(transfer_future, config)
         for part_number in range(1, num_parts + 1):
-            # Note: It is unfortunate that in order to do a multithreaded
-            # multipart upload we cannot simply copy the filelike object
-            # since there is not really a mechanism in python (i.e. os.dup
-            # points to the same OS filehandle which causes concurrency
-            # issues). So instead we need to read from the fileobj and
-            # encrypt them to seperate file-like objects in memory.
-
-            cipher_text, envelope = self.encrypt_manager.encrypt(
-                fileobj, part_size, config
-            )
+            cipher_text=self._config.enc_config.body_enc_manager.encrypt(fileobj=fileobj,amt=part_size)
             wrapped_data = six.BytesIO(cipher_text)
-            transfer_future.meta.call_args.extra_args['Metadata'] = envelope
-            new_part_size = self.padded_length(part_size)
+            new_part_size = self.calculate_length(part_size)
             last_chunk_size = transfer_future.meta.size - \
                               (num_parts - 1) * part_size
             total_size = new_part_size * (num_parts - 1) + \
-                         self.padded_length(last_chunk_size)
+                         self.calculate_length(last_chunk_size)
             read_file_chunk = ReadFileChunk(
                 fileobj=wrapped_data, chunk_size=new_part_size,
                 full_file_size=total_size,
