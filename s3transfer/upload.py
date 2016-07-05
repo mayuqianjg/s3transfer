@@ -390,6 +390,9 @@ class UploadNonSeekableInputManager(UploadInputManager):
             part_content = None
             yield part_number, part_object
 
+    def inject_extra_params(self, transfer_future, config):
+        return
+
     def _read(self, fileobj, amount, truncate=True):
         """
         Reads a specific amount of data from a stream and returns it. If there

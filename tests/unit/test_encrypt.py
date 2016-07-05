@@ -41,10 +41,6 @@ class TestIOEncryptor(BaseTaskTest):
             body_encryptor_provider=AesCbcBodyEncryptorProvider())
         self.io_encryptor = IOEncryptor(config.enc_config)
 
-    def test_encrypt_envelope(self):
-        self.assertEqual(isinstance(self.io_encryptor.encrypt_envelope(),
-                                    dict), True)
-
     def test_encrypt_body(self):
         self.tempdir = tempfile.mkdtemp()
         self.filename = os.path.join(self.tempdir, 'myfile')
@@ -116,6 +112,7 @@ class TestKmsEnvelopeEncryptor(BaseTaskTest):
         return client
 
     def test_get_envelope(self):
+        # Here the encrypted envelope is tested
         key = b'12345678901234567890123456789012'
         iv = b'1234567890123456'
         kms = KmsEnvelopeEncryptor(kmsclient=self.kmsclient,

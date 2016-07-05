@@ -12,9 +12,8 @@
 # language governing permissions and limitations under the License.
 import time
 
-from concurrent.futures import CancelledError
-
 from botocore.compat import six
+from concurrent.futures import CancelledError
 from tests import RecordingSubscriber, NonSeekableReader
 from tests.integration import BaseTransferManagerIntegTest
 from s3transfer.manager import TransferConfig
@@ -99,7 +98,11 @@ class TestUpload(BaseTransferManagerIntegTest):
         # the total amount of bytes we've seen (via the "amount"
         # arg to the callback function) should be the size
         # of the file we uploaded.
-        self.assertEqual(subscriber.calculate_bytes_seen(), 20 * 1024 * 1024)
+        self.assertEqual(subscriber.calculate_bytes_seen(),
+                         self._calculate_length(20 * 1024 * 1024))
+
+    def _calculate_length(self, size):
+        return size
 
 
 class TestUploadSeekableStream(TestUpload):
@@ -110,3 +113,4 @@ class TestUploadSeekableStream(TestUpload):
 class TestUploadNonSeekableStream(TestUpload):
     def get_input_fileobj(self, size, name=''):
         return NonSeekableReader(b'0' * size)
+

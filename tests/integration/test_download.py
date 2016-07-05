@@ -136,3 +136,4 @@ class TestDownload(BaseTransferManagerIntegTest):
                 self.bucket_name, '20mb.txt', f)
             future.result()
         assert_files_equal(filename, download_path)
+

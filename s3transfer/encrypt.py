@@ -67,9 +67,9 @@ class EnvelopeEncryptorProvider(object):
     """
 
     def get_envelope_encryptor(self):
-        """Return a key with some info for the envelope encryption
+        """Return an envelope encryptor for the envelope encryption
 
-        :returns: A dict containing key and key description 
+        :returns: An envelope encryptor
         """
         raise NotImplementedError('must implement get_envelope_encryptor()')
 
@@ -97,9 +97,9 @@ class BodyEncryptorProvider(object):
     """
 
     def get_body_encryptor(self):
-        """Return a key with some info for the body encryption
+        """Return a body encryptor for body encryption
 
-        :returns: A dict containing key and key description.  
+        :returns: A body encryptor  
         """
         raise NotImplementedError('must implement get_body_encryptor()')
 
@@ -131,7 +131,7 @@ class EncryptionConfig(object):
                  ):
         """
         :type env_encryptor_provider: EnvelopeEncryptorProvider class
-        :param env_encryptor_provider: The key provider for envelope encryption.
+        :param env_encryptor_provider: The key provider for envelope encryption
 
         :type body_encryptor_provider: BodyEncryptorProvider class
         :param body_encryptor_provider: The key provider for body encryption.

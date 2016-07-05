@@ -45,7 +45,8 @@ class TransferConfig(object):
                  max_io_queue_size=1000,
                  num_download_attempts=5,
                  max_in_memory_upload_chunks=10,
-                 enc_config=None):
+                 enc_config=None,
+                 dec_config=None):
         """Configurations for the transfer mangager
 
         :param multipart_threshold: The threshold for which multipart
@@ -104,9 +105,15 @@ class TransferConfig(object):
             because the ``max_in_memory_upload_chunks`` value has been reached
             by the threads making the upload request.
 
+        :type enc_config: s3transfer.encrypt.EncryptionConfig
         :param enc_config: The client-side encryption configuration.
-            This is optional. Read encrypt.py for more details about the
-            parameters and settings.
+            This function is optional. If this parameter is None, then 
+            the encryption function is turned off.
+        
+        :type dec_config: s3transfer.decrypt.DecryptionConfig
+        :param dec_config: The client-side decryption configuration.
+            This function is optional. If this parameter is None, then 
+            the decryption function is turned off.
         """
         self.multipart_threshold = multipart_threshold
         self.multipart_chunksize = multipart_chunksize
@@ -118,6 +125,7 @@ class TransferConfig(object):
         self.num_download_attempts = num_download_attempts
         self.max_in_memory_upload_chunks = max_in_memory_upload_chunks
         self.enc_config = enc_config
+        self.dec_config = dec_config
 
 
 class TransferManager(object):
