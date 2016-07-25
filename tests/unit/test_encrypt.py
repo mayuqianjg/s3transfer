@@ -24,7 +24,10 @@ from cryptography.hazmat.primitives.ciphers import Cipher, \
 from s3transfer.encrypt import EncryptionConfig
 from s3transfer.encrypt import IOEncryptor, \
     AesCbcBodyEncryptorProvider, AesCbcBodyEncryptor, \
-    KmsEnvelopeEncryptorProvider, KmsEnvelopeEncryptor
+    KmsEnvelopeEncryptorProvider, KmsEnvelopeEncryptor, \
+    AesKeyWrapEnvelopeEncryptorProvider, AesKeyWrapEnvelopeEncryptor, \
+    AesEcbEnvelopeEncryptorProvider, AesEcbEnvelopeEncryptor, \
+    AesGcmBodyEncryptorProvider, AesGcmBodyEncryptor
 from s3transfer.manager import TransferConfig
 from tests import BaseTaskTest
 
@@ -76,6 +79,32 @@ class TestKmsEnvelopeEncryptorProvider(BaseTaskTest):
         self.assertEqual(kmsmanager.kms_key_id, self.key_id)
 
 
+class TestAesKeyWrapEnvelopeEncryptorProvider(BaseTaskTest):
+    def setUp(self):
+        super(TestAesKeyWrapEnvelopeEncryptorProvider, self).setUp()
+        self.userkey = b'1234567890123456'
+        self.encryptor_provider = AesKeyWrapEnvelopeEncryptorProvider(
+            self.userkey)
+
+    def test_get_envelope_encryptor(self):
+        encryption_manager = self.encryptor_provider.get_envelope_encryptor()
+        self.assertEqual(isinstance(
+            encryption_manager, AesKeyWrapEnvelopeEncryptor), True)
+
+
+class TestAesEcbEnvelopeEncryptorProvider(BaseTaskTest):
+    def setUp(self):
+        super(TestAesEcbEnvelopeEncryptorProvider, self).setUp()
+        self.userkey = b'1234567890123456'
+        self.encryptor_provider = AesEcbEnvelopeEncryptorProvider(
+            self.userkey)
+
+    def test_get_envelope_encryptor(self):
+        encryption_manager = self.encryptor_provider.get_envelope_encryptor()
+        self.assertEqual(isinstance(
+            encryption_manager, AesEcbEnvelopeEncryptor), True)
+
+
 class TestAesCbcBodyEncryptorProvider(BaseTaskTest):
     def setUp(self):
         super(TestAesCbcBodyEncryptorProvider, self).setUp()
@@ -85,6 +114,17 @@ class TestAesCbcBodyEncryptorProvider(BaseTaskTest):
         aescbcmanager = self.encryptor_provider.get_body_encryptor()
         self.assertEqual(isinstance(
             aescbcmanager, AesCbcBodyEncryptor), True)
+
+
+class TestAesGcmBodyEncryptorProvider(BaseTaskTest):
+    def setUp(self):
+        super(TestAesGcmBodyEncryptorProvider, self).setUp()
+        self.encryptor_provider = AesGcmBodyEncryptorProvider()
+
+    def test_get_body_encryptor(self):
+        encryption_manager = self.encryptor_provider.get_body_encryptor()
+        self.assertEqual(isinstance(
+            encryption_manager, AesGcmBodyEncryptor), True)
 
 
 class TestKmsEnvelopeEncryptor(BaseTaskTest):
@@ -125,6 +165,48 @@ class TestKmsEnvelopeEncryptor(BaseTaskTest):
             'x-amz-iv': base64.b64encode(iv).decode('UTF-8'),
             'x-amz-wrap-alg': 'kms',
             'x-amz-matdesc': json.dumps(self.kms_context)
+        })
+
+
+class TestAesEcbEnvelopeEncryptor(BaseTaskTest):
+    def setUp(self):
+        super(TestAesEcbEnvelopeEncryptor, self).setUp()
+        self.userkey = b'1234567890123456'
+        self.encryption_manager = AesEcbEnvelopeEncryptor(self.userkey)
+
+    def test_get_envelope(self):
+        # Here the encrypted envelope is tested
+        key = b'12345678901234567890123456789012'
+        iv = b'1234567890123456'
+        expected_key = \
+            'dXzNDNxckOrb7uz2ON0AAMa/oq6BhXPyhbLV8HHxnGcFAYegzeWphyy6sJGrc+VT'
+        envelope = self.encryption_manager.get_envelope(key, iv)
+        self.assertEqual(envelope, {
+            'x-amz-key': expected_key,
+            'x-amz-iv': base64.b64encode(iv).decode('UTF-8'),
+            'x-amz-matdesc': '{}'
+        })
+
+
+class TestAesKeyWrapEnvelopeEncryptor(BaseTaskTest):
+    def setUp(self):
+        super(TestAesKeyWrapEnvelopeEncryptor, self).setUp()
+        self.userkey = b'1234567890123456'
+        self.encryption_manager = AesKeyWrapEnvelopeEncryptor(
+            self.userkey)
+
+    def test_get_envelope(self):
+        # Here the encrypted envelope is tested
+        key = b'12345678901234567890123456789012'
+        iv = b'1234567890123456'
+        expected_key = \
+            'fn1XbKH6D83dR9GVZeqMk6KiJIcP7+o1ULOOnZJU4CYfvWVTmGFi1w=='
+        envelope = self.encryption_manager.get_envelope(key, iv)
+        self.assertEqual(envelope, {
+            'x-amz-key-v2': expected_key,
+            'x-amz-iv': base64.b64encode(iv).decode('UTF-8'),
+            'x-amz-matdesc': '{"TYPE":"SYMMETRIC"}',
+            'x-amz-wrap-alg': 'AESWrap'
         })
 
 
@@ -172,3 +254,47 @@ class TestAesCbcBodyEncryptor(BaseTaskTest):
         unpadder = padding.PKCS7(128).unpadder()
         plaintext = unpadder.update(plaintext) + unpadder.finalize()
         self.assertEqual(self.content, plaintext)
+
+
+class TestAesGcmBodyEncryptor(BaseTaskTest):
+    def setUp(self):
+        super(TestAesGcmBodyEncryptor, self).setUp()
+        self._userkey = b'This is a key123'
+        key = b'12345678901234567890123456789012'
+        iv = b'1234567890123456'
+        self.body_encryptor = AesGcmBodyEncryptor(key, iv)
+
+    def test_get_extra_envelope(self):
+        envelope = self.body_encryptor.get_extra_envelope()
+        self.assertEqual(envelope, {'x-amz-cek-alg': 'AES/GCM/NoPadding'})
+
+    def test_calculate_size(self):
+        origin_size = [1, 10, 100, 1000]
+        expect_size = [17, 26, 116, 1016]
+        for i in [0, 1, 2, 3]:
+            new_size = self.body_encryptor.calculate_size(
+                start=origin_size[i], final=True)
+            self.assertEqual(new_size, expect_size[i])
+            new_size = self.body_encryptor.calculate_size(
+                origin_size[i], origin_size[i] * 2, True)
+            self.assertEqual(new_size, expect_size[i])
+
+    def test_encrypt(self):
+        self.tempdir = tempfile.mkdtemp()
+        self.filename = os.path.join(self.tempdir, 'myfile')
+        self.content = b'my content'
+        self.amt = 10
+        self.cipher = self.body_encryptor.get_cipher()
+        with open(self.filename, 'wb') as f:
+            f.write(self.content)
+        with open(self.filename, 'rb') as fileobj:
+            cipher_text = self.body_encryptor.encrypt(
+                fileobj, self.amt, self.cipher, True)
+        cipher = Cipher(algorithms.AES(self.body_encryptor.key),
+                        modes.GCM(self.body_encryptor.iv, cipher_text[-16:]),
+                        backend=default_backend())
+        decryptor = cipher.decryptor()
+        decryptor.authenticate_additional_data(b'')
+        plaintext = decryptor.update(cipher_text[:-16]) + decryptor.finalize()
+        self.assertEqual(self.content, plaintext)
+

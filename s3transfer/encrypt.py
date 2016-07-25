@@ -18,6 +18,7 @@ import os
 try:
     from cryptography.hazmat.backends import default_backend
     from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives import keywrap
     from cryptography.hazmat.primitives.ciphers import Cipher, \
         algorithms, modes
 except ImportError as e:
@@ -156,12 +157,47 @@ class KmsEnvelopeEncryptorProvider(EnvelopeEncryptorProvider):
         return envelope_encryptor
 
 
+class AesKeyWrapEnvelopeEncryptorProvider(EnvelopeEncryptorProvider):
+    """AES Key Wrap provider class for envelope encryption.
+
+    :type userkey: bytes
+    :param userkey: The master key provided by user
+    """
+    def __init__(self, userkey):
+        self._userkey = userkey
+
+    def get_envelope_encryptor(self):
+        return AesKeyWrapEnvelopeEncryptor(self._userkey)
+        
+
+class AesEcbEnvelopeEncryptorProvider(EnvelopeEncryptorProvider):
+    """AES ECB provider class for envelope encryption.
+
+    :type userkey: bytes
+    :param userkey: The master key provided by user
+    """
+    def __init__(self, userkey):
+        self._userkey = userkey
+
+    def get_envelope_encryptor(self):
+        return AesEcbEnvelopeEncryptor(self._userkey)
+
+
 class AesCbcBodyEncryptorProvider(BodyEncryptorProvider):
-    """CBC key provider class for body encryption.
+    """AES CBC key provider class for body encryption.
     """
 
     def get_body_encryptor(self):
         return AesCbcBodyEncryptor(os.urandom(32),
+                                   os.urandom(16))
+
+
+class AesGcmBodyEncryptorProvider(BodyEncryptorProvider):
+    """AES GCM key provider class for body encryption.
+    """
+
+    def get_body_encryptor(self):
+        return AesGcmBodyEncryptor(os.urandom(32),
                                    os.urandom(16))
 
 
@@ -186,6 +222,45 @@ class KmsEnvelopeEncryptor(EnvelopeEncryptor):
             'x-amz-iv': base64.b64encode(iv).decode('UTF-8'),
             'x-amz-wrap-alg': 'kms',
             'x-amz-matdesc': json.dumps(self.kms_context)
+        }
+        return envelope
+
+
+class AesEcbEnvelopeEncryptor(EnvelopeEncryptor):
+    def __init__(self, userkey):
+        self._userkey = userkey
+
+    def get_envelope(self, key, iv):
+        env_cipher = Cipher(algorithms.AES(self._userkey),
+                            modes.ECB(),
+                            backend=default_backend()
+                            )
+        env = env_cipher.encryptor()
+        # Padding
+        key_padder = padding.PKCS7(128).padder()
+        key = key_padder.update(key) + key_padder.finalize()
+        encrypted_key = env.update(key) + env.finalize()
+        envelope = {
+            'x-amz-key': (base64.b64encode(encrypted_key)).decode('UTF-8'),
+            'x-amz-iv': (base64.b64encode(iv)).decode('UTF-8'),
+            'x-amz-matdesc': '{}',
+        }
+        return envelope
+
+
+class AesKeyWrapEnvelopeEncryptor(EnvelopeEncryptor):
+    def __init__(self, userkey):
+        self._userkey = userkey
+
+    def get_envelope(self, key, iv):
+        encrypted_key = keywrap.aes_key_wrap(wrapping_key=self._userkey,
+                                             key_to_wrap=key,
+                                             backend=default_backend())
+        envelope = {
+            'x-amz-key-v2': (base64.b64encode(encrypted_key)).decode('UTF-8'),
+            'x-amz-iv': (base64.b64encode(iv)).decode('UTF-8'),
+            'x-amz-matdesc': '{"TYPE":"SYMMETRIC"}',
+            'x-amz-wrap-alg': 'AESWrap'
         }
         return envelope
 
@@ -231,3 +306,54 @@ class AesCbcBodyEncryptor(BodyEncryptor):
         if final:
             cipher_text += encryptor.finalize()
         return cipher_text
+
+
+class AesGcmBodyEncryptor(BodyEncryptor):
+    def __init__(self, key, iv):
+        self.key = key
+        self.iv = iv
+        self._associated_data = b''
+        self._tag_size = 16
+
+    def get_extra_envelope(self):
+        envelope = {'x-amz-cek-alg': 'AES/GCM/NoPadding'}
+        return envelope
+
+    def calculate_size(self, start, end=None, final=False):
+        # Returns the length after appending the tag
+        if final:
+            if end is not None:
+                return end - start + self._tag_size
+            else:
+                # Only one parameter, 'start' stands for the length
+                return start + self._tag_size
+        else:
+            if end is None:
+                return start
+            else:
+                return end - start
+        
+    def get_cipher(self):
+        # Returns the encryptor cipher
+        cipher = Cipher(algorithms.AES(self.key),
+                        modes.GCM(self.iv),
+                        backend=default_backend())
+        encryptor = cipher.encryptor()
+        # Only need to authenticate once
+        encryptor.authenticate_additional_data(self._associated_data)
+        return encryptor
+
+    def encrypt(self, fileobj, amt, encryptor, final=False):
+        # The data must be in bytes form
+        read_data = fileobj.read(amt)
+        if final:
+            # Encrypt the plaintext and get the associated ciphertext.
+            # GCM does not require padding.
+            cipher_text = encryptor.update(read_data) + encryptor.finalize()
+            tag = encryptor.tag
+            cipher_text = b''.join([cipher_text, tag])
+        else:
+            cipher_text = encryptor.update(read_data)
+        return cipher_text
+
+    
