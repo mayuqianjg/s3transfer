@@ -13,6 +13,7 @@
 import base64
 import json
 import os
+import shutil
 import tempfile
 
 import botocore.session
@@ -53,15 +54,15 @@ class TestIOEncryptor(BaseTaskTest):
             f.write(self.content)
         with open(self.filename, 'rb') as fileobj:
             cipher_text = self.io_encryptor.encrypt_body(fileobj, self.amt)
-        self.assertEqual(isinstance(cipher_text, bytes), True)
+        self.assertIsInstance(cipher_text, bytes)
 
     def test_calculate_size(self):
         origin_size = [1, 10, 100, 1000]
         for size in origin_size:
             new_size = self.io_encryptor.calculate_size(size)
-            self.assertEqual(isinstance(new_size, int), True)
+            self.assertIsInstance(new_size, int)
             new_size = self.io_encryptor.calculate_size(size, size * 2)
-            self.assertEqual(isinstance(new_size, int), True)
+            self.assertIsInstance(new_size, int)
 
 
 class TestKmsEnvelopeEncryptorProvider(BaseTaskTest):
@@ -74,7 +75,7 @@ class TestKmsEnvelopeEncryptorProvider(BaseTaskTest):
 
     def test_get_envelope_encryptor(self):
         kmsmanager = self.encryptor_provider.get_envelope_encryptor()
-        self.assertEqual(isinstance(kmsmanager, KmsEnvelopeEncryptor), True)
+        self.assertIsInstance(kmsmanager, KmsEnvelopeEncryptor)
         self.assertEqual(kmsmanager.kmsclient, self.client)
         self.assertEqual(kmsmanager.kms_key_id, self.key_id)
 
@@ -88,8 +89,8 @@ class TestAesKeyWrapEnvelopeEncryptorProvider(BaseTaskTest):
 
     def test_get_envelope_encryptor(self):
         encryption_manager = self.encryptor_provider.get_envelope_encryptor()
-        self.assertEqual(isinstance(
-            encryption_manager, AesKeyWrapEnvelopeEncryptor), True)
+        self.assertIsInstance(
+            encryption_manager, AesKeyWrapEnvelopeEncryptor)
 
 
 class TestAesEcbEnvelopeEncryptorProvider(BaseTaskTest):
@@ -101,8 +102,8 @@ class TestAesEcbEnvelopeEncryptorProvider(BaseTaskTest):
 
     def test_get_envelope_encryptor(self):
         encryption_manager = self.encryptor_provider.get_envelope_encryptor()
-        self.assertEqual(isinstance(
-            encryption_manager, AesEcbEnvelopeEncryptor), True)
+        self.assertIsInstance(
+            encryption_manager, AesEcbEnvelopeEncryptor)
 
 
 class TestAesCbcBodyEncryptorProvider(BaseTaskTest):
@@ -112,8 +113,8 @@ class TestAesCbcBodyEncryptorProvider(BaseTaskTest):
 
     def test_get_body_encryptor(self):
         aescbcmanager = self.encryptor_provider.get_body_encryptor()
-        self.assertEqual(isinstance(
-            aescbcmanager, AesCbcBodyEncryptor), True)
+        self.assertIsInstance(
+            aescbcmanager, AesCbcBodyEncryptor)
 
 
 class TestAesGcmBodyEncryptorProvider(BaseTaskTest):
@@ -123,8 +124,8 @@ class TestAesGcmBodyEncryptorProvider(BaseTaskTest):
 
     def test_get_body_encryptor(self):
         encryption_manager = self.encryptor_provider.get_body_encryptor()
-        self.assertEqual(isinstance(
-            encryption_manager, AesGcmBodyEncryptor), True)
+        self.assertIsInstance(
+            encryption_manager, AesGcmBodyEncryptor)
 
 
 class TestKmsEnvelopeEncryptor(BaseTaskTest):
@@ -217,35 +218,52 @@ class TestAesCbcBodyEncryptor(BaseTaskTest):
         key = b'12345678901234567890123456789012'
         iv = b'1234567890123456'
         self.body_encryptor = AesCbcBodyEncryptor(key, iv)
+        self.tempdir = tempfile.mkdtemp()
+        self.filename = os.path.join(self.tempdir, 'myfile')
+
+    def tearDown(self):
+        super(TestAesCbcBodyEncryptor, self).tearDown()
+        shutil.rmtree(self.tempdir)
 
     def test_get_extra_envelope(self):
         envelope = self.body_encryptor.get_extra_envelope()
         self.assertEqual(envelope, {'x-amz-cek-alg': 'AES/CBC/PKCS5Padding'})
 
-    def test_calculate_size(self):
+    def test_calculate_size_final(self):
         origin_size = [1, 10, 100, 1000]
         expect_size = [16, 16, 112, 1008]
         for i in [0, 1, 2, 3]:
+            # Provide the length only
             new_size = self.body_encryptor.calculate_size(
                 start=origin_size[i], final=True)
             self.assertEqual(new_size, expect_size[i])
+            # Provide the starting and ending positions 
             new_size = self.body_encryptor.calculate_size(
                 origin_size[i], origin_size[i] * 2, True)
             self.assertEqual(new_size, expect_size[i])
+    
+    def test_calculate_size_not_final(self):
+        origin_size = [1, 10, 100, 1000]
+        expect_size = [1, 10, 100, 1000]
+        for i in [0, 1, 2, 3]:
+            # Provide the length only
+            new_size = self.body_encryptor.calculate_size(
+                start=origin_size[i], final=False)
+            self.assertEqual(new_size, expect_size[i])
+            # Provide the starting and ending positions 
+            new_size = self.body_encryptor.calculate_size(
+                origin_size[i], origin_size[i] * 2, False)
+            self.assertEqual(new_size, expect_size[i])
 
     def test_encrypt(self):
-        self.tempdir = tempfile.mkdtemp()
-        self.filename = os.path.join(self.tempdir, 'myfile')
         self.content = b'my content'
-        self.amt = 10
+        self.amt = len(self.content)
         self.cipher = self.body_encryptor.get_cipher()
         with open(self.filename, 'wb') as f:
             f.write(self.content)
-
         with open(self.filename, 'rb') as fileobj:
             cipher_text = self.body_encryptor.encrypt(
                 fileobj, self.amt, self.cipher, True)
-
         cipher = Cipher(algorithms.AES(self.body_encryptor.key),
                         modes.CBC(self.body_encryptor.iv),
                         backend=default_backend())
@@ -256,40 +274,45 @@ class TestAesCbcBodyEncryptor(BaseTaskTest):
         self.assertEqual(self.content, plaintext)
 
 
-class TestAesGcmBodyEncryptor(BaseTaskTest):
+class TestAesGcmBodyEncryptor(TestAesCbcBodyEncryptor):
     def setUp(self):
         super(TestAesGcmBodyEncryptor, self).setUp()
-        self._userkey = b'This is a key123'
         key = b'12345678901234567890123456789012'
         iv = b'1234567890123456'
         self.body_encryptor = AesGcmBodyEncryptor(key, iv)
+
+    def tearDown(self):
+        super(TestAesGcmBodyEncryptor, self).tearDown()
 
     def test_get_extra_envelope(self):
         envelope = self.body_encryptor.get_extra_envelope()
         self.assertEqual(envelope, {'x-amz-cek-alg': 'AES/GCM/NoPadding'})
 
-    def test_calculate_size(self):
+    def test_calculate_size_final(self):
         origin_size = [1, 10, 100, 1000]
         expect_size = [17, 26, 116, 1016]
         for i in [0, 1, 2, 3]:
+            # Provide the length only
             new_size = self.body_encryptor.calculate_size(
                 start=origin_size[i], final=True)
             self.assertEqual(new_size, expect_size[i])
+            # Provide the starting and ending positions 
             new_size = self.body_encryptor.calculate_size(
                 origin_size[i], origin_size[i] * 2, True)
             self.assertEqual(new_size, expect_size[i])
 
     def test_encrypt(self):
-        self.tempdir = tempfile.mkdtemp()
-        self.filename = os.path.join(self.tempdir, 'myfile')
         self.content = b'my content'
-        self.amt = 10
+        self.amt = len(self.content)
         self.cipher = self.body_encryptor.get_cipher()
         with open(self.filename, 'wb') as f:
             f.write(self.content)
         with open(self.filename, 'rb') as fileobj:
             cipher_text = self.body_encryptor.encrypt(
                 fileobj, self.amt, self.cipher, True)
+        # Note the GCM decryptor construction requires the tag as the format:
+        # modes.GCM(iv, tag)
+        # If the tag is not correct, it raises an error when call finalize()
         cipher = Cipher(algorithms.AES(self.body_encryptor.key),
                         modes.GCM(self.body_encryptor.iv, cipher_text[-16:]),
                         backend=default_backend())

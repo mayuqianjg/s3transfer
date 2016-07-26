@@ -312,6 +312,9 @@ class AesGcmBodyEncryptor(BodyEncryptor):
     def __init__(self, key, iv):
         self.key = key
         self.iv = iv
+        # The associated data is used to authenticate the GCM cipher.
+        # This parameter is different from the tag since this is actually
+        # an input for the cipher, not the output. 
         self._associated_data = b''
         self._tag_size = 16
 
@@ -320,8 +323,20 @@ class AesGcmBodyEncryptor(BodyEncryptor):
         return envelope
 
     def calculate_size(self, start, end=None, final=False):
-        # Returns the length after appending the tag
+        """This function is to calculate the size of encrypted file chunk.
+        
+        Two cases of function overloading are considered:
+        1. Only length is provided:
+            calculate_size(length, final) 
+        2. Starting and ending positions are indicated:
+            calculate_size(start, end, final) 
+
+        If the file chunk is the last one, the situation is a little different 
+        since we need to consider the padding or tag issues. Hence the parameter 
+        final is used to indicate the status.
+        """
         if final:
+            # Returns the length after appending the tag
             if end is not None:
                 return end - start + self._tag_size
             else:
