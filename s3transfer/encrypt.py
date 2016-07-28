@@ -58,9 +58,9 @@ class IOEncryptor(object):
             fileobj, amt, self._cipher, final)
         return chunk
 
-    def calculate_size(self, start, end=None, final=False):
+    def calculate_size(self, length, final=False):
         # Returns the length after encryption
-        return self._body_encryptor.calculate_size(start, end, final)
+        return self._body_encryptor.calculate_size(length, final)
 
 
 class EnvelopeEncryptorProvider(object):
@@ -274,18 +274,11 @@ class AesCbcBodyEncryptor(BodyEncryptor):
         envelope = {'x-amz-cek-alg': 'AES/CBC/PKCS5Padding'}
         return envelope
 
-    def calculate_size(self, start, end=None, final=False):
+    def calculate_size(self, original_length, final=False):
         if not final:
-            if end is None:
-                return start
-            else:
-                return end - start
+            return original_length
         # Returns the length after padding
-        if end is not None:
-            return (math.floor((end - start) / 16) + 1) * 16
-        else:
-            # Only one parameter, 'start' stands for the length
-            return (math.floor(start / 16) + 1) * 16
+        return (math.floor(original_length / 16) + 1) * 16
 
     def get_cipher(self):
         # Returns the encryptor cipher
@@ -322,31 +315,17 @@ class AesGcmBodyEncryptor(BodyEncryptor):
         envelope = {'x-amz-cek-alg': 'AES/GCM/NoPadding'}
         return envelope
 
-    def calculate_size(self, start, end=None, final=False):
+    def calculate_size(self, original_length, final=False):
         """This function is to calculate the size of encrypted file chunk.
-        
-        Two cases of function overloading are considered:
-        1. Only length is provided:
-            calculate_size(length, final) 
-        2. Starting and ending positions are indicated:
-            calculate_size(start, end, final) 
 
         If the file chunk is the last one, the situation is a little different 
         since we need to consider the padding or tag issues. Hence the parameter 
         final is used to indicate the status.
         """
-        if final:
-            # Returns the length after appending the tag
-            if end is not None:
-                return end - start + self._tag_size
-            else:
-                # Only one parameter, 'start' stands for the length
-                return start + self._tag_size
-        else:
-            if end is None:
-                return start
-            else:
-                return end - start
+        if not final:
+            return original_length
+        # Returns the length after appending the tag
+        return original_length + self._tag_size
         
     def get_cipher(self):
         # Returns the encryptor cipher
@@ -354,8 +333,6 @@ class AesGcmBodyEncryptor(BodyEncryptor):
                         modes.GCM(self.iv),
                         backend=default_backend())
         encryptor = cipher.encryptor()
-        # Only need to authenticate once
-        encryptor.authenticate_additional_data(self._associated_data)
         return encryptor
 
     def encrypt(self, fileobj, amt, encryptor, final=False):

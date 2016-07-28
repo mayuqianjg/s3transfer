@@ -500,7 +500,7 @@ class FilenameEncryptionManager(UploadFilenameInputManager):
         return fileobj
 
     def _calculate_length(self, length, final=True):
-        return self.io_encryptor.calculate_size(start=length, final=final)
+        return self.io_encryptor.calculate_size(length, final)
 
     def inject_extra_params(self, transfer_future, config):
         # Perform envelope encryption if needed
@@ -525,7 +525,7 @@ class SeekableEncryptionManager(UploadSeekableInputManager):
         return True
         
     def _calculate_length(self, length, final=True):
-        return self.io_encryptor.calculate_size(start=length, final=final)
+        return self.io_encryptor.calculate_size(length, final)
 
     def get_put_object_body(self, transfer_future):
         fileobj, callbacks, transfer_size = \

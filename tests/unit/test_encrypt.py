@@ -235,24 +235,16 @@ class TestAesCbcBodyEncryptor(BaseTaskTest):
         for i in [0, 1, 2, 3]:
             # Provide the length only
             new_size = self.body_encryptor.calculate_size(
-                start=origin_size[i], final=True)
+                origin_size[i], True)
             self.assertEqual(new_size, expect_size[i])
-            # Provide the starting and ending positions 
-            new_size = self.body_encryptor.calculate_size(
-                origin_size[i], origin_size[i] * 2, True)
-            self.assertEqual(new_size, expect_size[i])
-    
+           
     def test_calculate_size_not_final(self):
         origin_size = [1, 10, 100, 1000]
         expect_size = [1, 10, 100, 1000]
         for i in [0, 1, 2, 3]:
             # Provide the length only
             new_size = self.body_encryptor.calculate_size(
-                start=origin_size[i], final=False)
-            self.assertEqual(new_size, expect_size[i])
-            # Provide the starting and ending positions 
-            new_size = self.body_encryptor.calculate_size(
-                origin_size[i], origin_size[i] * 2, False)
+                origin_size[i], False)
             self.assertEqual(new_size, expect_size[i])
 
     def test_encrypt(self):
@@ -294,13 +286,9 @@ class TestAesGcmBodyEncryptor(TestAesCbcBodyEncryptor):
         for i in [0, 1, 2, 3]:
             # Provide the length only
             new_size = self.body_encryptor.calculate_size(
-                start=origin_size[i], final=True)
+                origin_size[i], True)
             self.assertEqual(new_size, expect_size[i])
-            # Provide the starting and ending positions 
-            new_size = self.body_encryptor.calculate_size(
-                origin_size[i], origin_size[i] * 2, True)
-            self.assertEqual(new_size, expect_size[i])
-
+            
     def test_encrypt(self):
         self.content = b'my content'
         self.amt = len(self.content)
@@ -317,7 +305,6 @@ class TestAesGcmBodyEncryptor(TestAesCbcBodyEncryptor):
                         modes.GCM(self.body_encryptor.iv, cipher_text[-16:]),
                         backend=default_backend())
         decryptor = cipher.decryptor()
-        decryptor.authenticate_additional_data(b'')
         plaintext = decryptor.update(cipher_text[:-16]) + decryptor.finalize()
         self.assertEqual(self.content, plaintext)
 
