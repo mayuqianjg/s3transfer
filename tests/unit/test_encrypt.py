@@ -278,7 +278,8 @@ class TestAesGcmBodyEncryptor(TestAesCbcBodyEncryptor):
 
     def test_get_extra_envelope(self):
         envelope = self.body_encryptor.get_extra_envelope()
-        self.assertEqual(envelope, {'x-amz-cek-alg': 'AES/GCM/NoPadding'})
+        self.assertEqual(envelope, {'x-amz-cek-alg': 'AES/GCM/NoPadding',
+                                    'x-amz-tag-len': '128'})
 
     def test_calculate_size_final(self):
         origin_size = [1, 10, 100, 1000]

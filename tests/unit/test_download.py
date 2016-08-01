@@ -167,9 +167,12 @@ class TestDownloadFilenameDecryptOutputManager(
             env_decryptor_providers=[KmsEnvelopeDecryptorProvider(
                 client, key_id)],
             body_decryptor_providers=None)
-        self.response = {'Metadata': {'x-amz-key-v2': '12345678',
-            'x-amz-iv': '6shKKop95gee3WkMOFHiBw==', 'x-amz-matdesc': '{}',
-            'x-amz-wrap-alg': 'kms', 'x-amz-cek-alg': 'AES/CBC/PKCS5Padding'}}
+        self.response = {
+            'Metadata': {
+                'x-amz-key-v2': '12345678',
+                'x-amz-iv': '6shKKop95gee3WkMOFHiBw==', 'x-amz-matdesc': '{}',
+                'x-amz-wrap-alg': 'kms', 
+                'x-amz-cek-alg': 'AES/CBC/PKCS5Padding'}}
         response = {'Plaintext': b'12345678901234567890123456789012'}
         stubber.add_response(
             'decrypt', response
@@ -185,13 +188,13 @@ class TestDownloadFilenameDecryptOutputManager(
             download_target, self.config))
 
     def test_get_io_helper(self):
-        self.download_manager.get_io_helper(self.response)
+        self.download_manager.get_io_helper(self.response, None, None)
         self.assertFalse(self.download_manager.io_decryptor is None)
 
     def test_can_queue_file_io_task(self):
         self.download_manager.set_transfer_size(32)
         self.download_manager.io_decryptor = IODecryptor(
-            self.config.dec_config, self.response['Metadata'])
+            self.config.dec_config, self.response['Metadata'], None, None)
         fileobj = WriteCollector()
         self.download_manager.queue_file_io_task(
             fileobj=fileobj,
@@ -273,9 +276,12 @@ class TestDownloadSeekableDecryptOutputManager(
             env_decryptor_providers=[KmsEnvelopeDecryptorProvider(
                 client, key_id)],
             body_decryptor_providers=None)
-        self.response = {'Metadata': {'x-amz-key-v2': '12345678',
-            'x-amz-iv': '6shKKop95gee3WkMOFHiBw==', 'x-amz-matdesc': '{}',
-            'x-amz-wrap-alg': 'kms', 'x-amz-cek-alg': 'AES/CBC/PKCS5Padding'}}
+        self.response = {
+            'Metadata': {
+                'x-amz-key-v2': '12345678',
+                'x-amz-iv': '6shKKop95gee3WkMOFHiBw==', 'x-amz-matdesc': '{}',
+                'x-amz-wrap-alg': 'kms', 
+                'x-amz-cek-alg': 'AES/CBC/PKCS5Padding'}}
         response = {'Plaintext': b'12345678901234567890123456789012'}
         stubber.add_response(
             'decrypt', response
@@ -290,13 +296,13 @@ class TestDownloadSeekableDecryptOutputManager(
         self.future = self.get_transfer_future(self.call_args)
         
     def test_get_io_helper(self):
-        self.download_manager.get_io_helper(self.response)
+        self.download_manager.get_io_helper(self.response, None, None)
         self.assertFalse(self.download_manager.io_decryptor is None)
 
     def test_can_queue_file_io_task(self):
         self.download_manager.set_transfer_size(32)
         self.download_manager.io_decryptor = IODecryptor(
-            self.config.dec_config, self.response['Metadata'])
+            self.config.dec_config, self.response['Metadata'], None, None)
         fileobj = WriteCollector()
         self.download_manager.queue_file_io_task(
             fileobj=fileobj,

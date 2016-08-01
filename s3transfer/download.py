@@ -120,7 +120,7 @@ class DownloadOutputManager(object):
         raise NotImplementedError(
             'must implement get_final_io_task()')
 
-    def get_io_helper(self, response):
+    def get_io_helper(self, response, client, transfer_future):
         """This function is used to determine whether extra io helper is 
         needed. Normally customers may need decryption functions.
         """
@@ -190,7 +190,7 @@ class DownloadFilenameDecryptOutputManager(DownloadFilenameOutputManager):
             return DownloadFilenameOutputManager.is_compatible(
                 download_target, config)
 
-    def get_io_helper(self, response):
+    def get_io_helper(self, response, client, transfer_future):
         # If there is no metadata in the header, there
         # is no decryption needed.
         if 'Metadata' in response:
@@ -198,7 +198,8 @@ class DownloadFilenameDecryptOutputManager(DownloadFilenameOutputManager):
                 if key.startswith('x-amz-key'):
                     from s3transfer.decrypt import IODecryptor
                     self.io_decryptor = IODecryptor(
-                        self._config.dec_config, response['Metadata'])
+                        self._config.dec_config, response['Metadata'], 
+                        client, transfer_future)
 
     def queue_file_io_task(self, fileobj, data, offset, final=False):
         """This method will create a write IO queue. Then decrypt the data
@@ -243,8 +244,7 @@ class DownloadSeekableOutputManager(DownloadOutputManager):
             transfer_coordinator=self._transfer_coordinator)
 
 
-class DownloadSeekableDecryptOutputManager(
-    DownloadFilenameDecryptOutputManager):
+class DownloadSeekableDecryptOutputManager(DownloadFilenameDecryptOutputManager):
     def __init__(self, config, osutil, transfer_coordinator, io_executor,
                  defer_queue=None):
         super(DownloadSeekableDecryptOutputManager, self).__init__(
@@ -383,7 +383,8 @@ class DownloadSubmissionTask(SubmissionTask):
                                      self._transfer_coordinator,
                                      io_executor)
         download_output_manager.set_transfer_size(response['ContentLength'])
-        download_output_manager.get_io_helper(response)
+        download_output_manager.get_io_helper(
+            response, client, transfer_future)
 
         # If it is greater than threshold do a ranged download, otherwise
         # do a regular GetObject download.

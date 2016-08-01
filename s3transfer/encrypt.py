@@ -312,15 +312,17 @@ class AesGcmBodyEncryptor(BodyEncryptor):
         self._tag_size = 16
 
     def get_extra_envelope(self):
-        envelope = {'x-amz-cek-alg': 'AES/GCM/NoPadding'}
+        envelope = {'x-amz-cek-alg': 'AES/GCM/NoPadding', 
+                    'x-amz-tag-len': '128'
+                    }
         return envelope
 
     def calculate_size(self, original_length, final=False):
         """This function is to calculate the size of encrypted file chunk.
 
         If the file chunk is the last one, the situation is a little different 
-        since we need to consider the padding or tag issues. Hence the parameter 
-        final is used to indicate the status.
+        since we need to consider the padding or tag issues. Hence the 
+        parameter final is used to indicate the status.
         """
         if not final:
             return original_length
