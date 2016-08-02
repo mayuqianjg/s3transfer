@@ -14,6 +14,7 @@ import base64
 
 import botocore.session
 from botocore.stub import Stubber
+from botocore.compat import six
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, \
@@ -26,6 +27,9 @@ from s3transfer.decrypt import IODecryptor, \
     AesKeyWrapEnvelopeDecryptorProvider, AesKeyWrapEnvelopeDecryptor, \
     AesGcmBodyDecryptorProvider, AesGcmBodyDecryptor
 from s3transfer.manager import TransferConfig
+from s3transfer.utils import CallArgs
+from s3transfer.futures import TransferFuture
+from s3transfer.futures import TransferMeta
 from tests import BaseTaskTest
 
 
@@ -47,8 +51,12 @@ class TestIODecryptor(BaseTaskTest):
             'x-amz-key-v2': '12345678',
             'x-amz-iv': '6shKKop95gee3WkMOFHiBw==', 'x-amz-matdesc': '{}',
             'x-amz-wrap-alg': 'kms', 'x-amz-cek-alg': 'AES/CBC/PKCS5Padding'}
-        self.io_decryptor = IODecryptor(config.dec_config,
-                                        self.envelope, None, None)
+        self.client = botocore.session.get_session().create_client('s3')
+        self.transfer_future = TransferFuture()
+        self.transfer_future.meta.provide_transfer_size(10)
+        self.io_decryptor = IODecryptor(
+            config.dec_config, self.envelope, 
+            self.client, self.transfer_future)
         self.io_decryptor._initialize()
 
     def test_decrypt_envelope(self):
@@ -79,15 +87,15 @@ class TestKmsEnvelopeDecryptorProvider(BaseTaskTest):
 
     def test_get_envelope_decryptor(self):
         kmsmanager = self.decryptor_provider.get_envelope_decryptor()
-        self.assertEqual(isinstance(kmsmanager, KmsEnvelopeDecryptor), True)
+        self.assertIsInstance(kmsmanager, KmsEnvelopeDecryptor)
         self.assertEqual(kmsmanager.kmsclient, self.client)
         self.assertEqual(kmsmanager.kms_key_id, self.key_id)
 
     def test_is_compatible(self):
         envelope = {'x-amz-wrap-alg': 'kms',
                     'x-amz-cek-alg': 'AES/CBC/PKCS5Padding'}
-        self.assertEqual(
-            self.decryptor_provider.is_compatible(envelope), True)
+        self.assertTrue(
+            self.decryptor_provider.is_compatible(envelope))
 
 
 class TestAesKeyWrapEnvelopeDecryptorProvider(BaseTaskTest):
@@ -103,8 +111,8 @@ class TestAesKeyWrapEnvelopeDecryptorProvider(BaseTaskTest):
 
     def test_is_compatible(self):
         envelope = {'x-amz-wrap-alg': 'AESWrap'}
-        self.assertEqual(
-            self.decryptor_provider.is_compatible(envelope), True)
+        self.assertTrue(
+            self.decryptor_provider.is_compatible(envelope))
 
 
 class TestAesEcbEnvelopeDecryptorProvider(BaseTaskTest):
@@ -120,8 +128,8 @@ class TestAesEcbEnvelopeDecryptorProvider(BaseTaskTest):
 
     def test_is_compatible(self):
         envelope = {'x-amz-key': 'kxtwyBQ8EDstcPb7dEGGHA=='}
-        self.assertEqual(
-            self.decryptor_provider.is_compatible(envelope), True)
+        self.assertTrue(
+            self.decryptor_provider.is_compatible(envelope))
 
 
 class TestAesCbcBodyDecryptorProvider(BaseTaskTest):
@@ -133,28 +141,43 @@ class TestAesCbcBodyDecryptorProvider(BaseTaskTest):
         key = b'12345678901234567890123456789012'
         string = '6shKKop95gee3WkMOFHiBw=='
         iv = base64.b64decode(string.encode('UTF-8'))
-        aescbcmanager = self.decryptor_provider.get_body_decryptor(key, iv)
-        self.assertEqual(isinstance(
-            aescbcmanager, AesCbcBodyDecryptor), True)
+        aescbcmanager = self.decryptor_provider.get_body_decryptor(
+            key, iv, None, None)
+        self.assertIsInstance(
+            aescbcmanager, AesCbcBodyDecryptor)
 
     def test_is_compatible(self):
         envelope = {'x-amz-wrap-alg': 'kms',
                     'x-amz-cek-alg': 'AES/CBC/PKCS5Padding'}
-        self.assertEqual(
-            self.decryptor_provider.is_compatible(envelope), True)
+        self.assertTrue(
+            self.decryptor_provider.is_compatible(envelope))
 
 
 class TestAesGcmBodyDecryptorProvider(BaseTaskTest):
     def setUp(self):
         super(TestAesGcmBodyDecryptorProvider, self).setUp()
         self.decryptor_provider = AesGcmBodyDecryptorProvider()
+        self.client = botocore.session.get_session().create_client('s3')
+        self.stubber = Stubber(self.client)
+        response = {'Body': six.BytesIO(b'1234567890123456')}
+        self.stubber.add_response('get_object', response)
+        self.stubber.activate()
+        call_args = CallArgs(
+            fileobj=None, bucket='bucket', key='key', extra_args={},
+            subscribers=None
+        )
+        meta = TransferMeta(call_args)
+        self.transfer_future = TransferFuture(meta=meta)
+        self.transfer_future.meta.provide_transfer_size(4)
 
     def test_get_body_encryptor(self):
         key = b'12345678901234567890123456789012'
         string = '6shKKop95gee3WkMOFHiBw=='
         iv = base64.b64decode(string.encode('UTF-8'))
         decryption_manager = \
-            self.decryptor_provider.get_body_decryptor(key, iv)
+            self.decryptor_provider.get_body_decryptor(
+                key, iv, self.client, self.transfer_future
+            )
         self.assertIsInstance(
             decryption_manager, AesGcmBodyDecryptor)
 
@@ -162,8 +185,8 @@ class TestAesGcmBodyDecryptorProvider(BaseTaskTest):
         envelope = {'x-amz-wrap-alg': 'kms',
                     'x-amz-cek-alg': 'AES/GCM/NoPadding',
                     'x-amz-tag-len': '128'}
-        self.assertEqual(
-            self.decryptor_provider.is_compatible(envelope), True)
+        self.assertTrue(
+            self.decryptor_provider.is_compatible(envelope))
 
 
 class TestKmsEnvelopeDecryptor(BaseTaskTest):
@@ -251,7 +274,7 @@ class TestAesCbcBodyDecryptor(BaseTaskTest):
         iv = base64.b64decode(string.encode('UTF-8'))
         self.key = key
         self.iv = iv
-        self.body_decryptor = AesCbcBodyDecryptor(key, iv)
+        self.body_decryptor = AesCbcBodyDecryptor(key, iv, None, None)
 
     def test_decrypt(self):
         self.content = b'M\x8f\x817\x95\xfe\n\x91\xba\x19\xa7\xda\xe8D\xddS'
@@ -291,14 +314,27 @@ class TestAesGcmBodyDecryptor(BaseTaskTest):
         iv = base64.b64decode(string.encode('UTF-8'))
         self.key = key
         self.iv = iv
-        self.body_decryptor = AesGcmBodyDecryptor(key, iv)
+        self.client = botocore.session.get_session().create_client('s3')
+        self.stubber = Stubber(self.client)
+        response = {'Body': six.BytesIO(b'1234567890123456')}
+        self.stubber.add_response('get_object', response)
+        self.stubber.activate()
+        call_args = CallArgs(
+            fileobj=None, bucket='bucket', key='key', extra_args={},
+            subscribers=None
+        )
+        meta = TransferMeta(call_args)
+        self.transfer_future = TransferFuture(meta=meta)
+        self.transfer_future.meta.provide_transfer_size(4)
+        self.body_decryptor = AesGcmBodyDecryptor(
+            key, iv, self.client, self.transfer_future)
 
     def test_decrypt(self):
         expected_chunk = b'abcdefgh'
         content = self._encrypt(expected_chunk)
         self.body_decryptor.tag = content[-16:]
         self.body_decryptor.set_cipher()
-        chunk = self.body_decryptor.decrypt(content, True)
+        chunk = self.body_decryptor.decrypt(content[:-16], True)
         self.assertEqual(expected_chunk, chunk)
 
     def test_multipart_decrypt(self):
@@ -307,7 +343,7 @@ class TestAesGcmBodyDecryptor(BaseTaskTest):
         self.body_decryptor.tag = self.content[-16:]
         self.body_decryptor.set_cipher()
         content_part1 = self.content[:8 * 1024 * 1024]
-        content_part2 = self.content[8 * 1024 * 1024:]
+        content_part2 = self.content[8 * 1024 * 1024:-16]
         chunk1 = self.body_decryptor.decrypt(
             content_part1, False)
         chunk2 = self.body_decryptor.decrypt(

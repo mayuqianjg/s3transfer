@@ -34,7 +34,7 @@ from s3transfer.download import IORenameFileTask
 from s3transfer.download import IOStreamingWriteTask
 from s3transfer.download import IOWriteTask
 from s3transfer.exceptions import RetriesExceededError
-from s3transfer.futures import BoundedExecutor
+from s3transfer.futures import BoundedExecutor, TransferFuture
 from s3transfer.manager import TransferConfig
 from s3transfer.utils import CallArgs
 from s3transfer.utils import OSUtils
@@ -160,7 +160,10 @@ class TestDownloadFilenameDecryptOutputManager(
     def setUp(self):
         super(TestDownloadFilenameDecryptOutputManager, self).setUp()
         self.config = TransferConfig()
-        client = botocore.session.get_session().create_client('kms')
+        self.client = botocore.session.get_session().create_client('s3')
+        self.transfer_future = TransferFuture()
+        self.transfer_future.meta.provide_transfer_size(10)
+        client = botocore.session.get_session().create_client('kms')        
         stubber = Stubber(client)
         key_id = '25b33b36-649d-4f18-9979-3e49cb60c60d'
         self.config.dec_config = DecryptionConfig(
@@ -188,13 +191,15 @@ class TestDownloadFilenameDecryptOutputManager(
             download_target, self.config))
 
     def test_get_io_helper(self):
-        self.download_manager.get_io_helper(self.response, None, None)
+        self.download_manager.get_io_helper(
+            self.response, self.client, self.transfer_future)
         self.assertFalse(self.download_manager.io_decryptor is None)
 
     def test_can_queue_file_io_task(self):
         self.download_manager.set_transfer_size(32)
         self.download_manager.io_decryptor = IODecryptor(
-            self.config.dec_config, self.response['Metadata'], None, None)
+            self.config.dec_config, self.response['Metadata'], 
+            self.client, self.transfer_future)
         fileobj = WriteCollector()
         self.download_manager.queue_file_io_task(
             fileobj=fileobj,
@@ -269,6 +274,9 @@ class TestDownloadSeekableDecryptOutputManager(
     def setUp(self):
         super(TestDownloadSeekableDecryptOutputManager, self).setUp()
         self.config = TransferConfig()
+        self.client = botocore.session.get_session().create_client('s3')
+        self.transfer_future = TransferFuture()
+        self.transfer_future.meta.provide_transfer_size(10)
         client = botocore.session.get_session().create_client('kms')
         stubber = Stubber(client)
         key_id = '25b33b36-649d-4f18-9979-3e49cb60c60d'
@@ -296,13 +304,15 @@ class TestDownloadSeekableDecryptOutputManager(
         self.future = self.get_transfer_future(self.call_args)
         
     def test_get_io_helper(self):
-        self.download_manager.get_io_helper(self.response, None, None)
+        self.download_manager.get_io_helper(
+            self.response, self.client, self.transfer_future)
         self.assertFalse(self.download_manager.io_decryptor is None)
 
     def test_can_queue_file_io_task(self):
         self.download_manager.set_transfer_size(32)
         self.download_manager.io_decryptor = IODecryptor(
-            self.config.dec_config, self.response['Metadata'], None, None)
+            self.config.dec_config, self.response['Metadata'], 
+            self.client, self.transfer_future)
         fileobj = WriteCollector()
         self.download_manager.queue_file_io_task(
             fileobj=fileobj,

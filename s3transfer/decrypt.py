@@ -21,8 +21,6 @@ try:
 except ImportError as e:
     raise RuntimeError('cryptography library not found')
 
-tag_length = 16
-
 
 class IODecryptor(object):
     """Main decryption class for performing decryption.
@@ -43,13 +41,21 @@ class IODecryptor(object):
         self._transfer_future = transfer_future
         self._env_decryptor = None
         self._body_decryptor = None
+        length = self._get_transfer_length()
+        transfer_future.meta.provide_transfer_size(length)
 
     def _initialize(self):
         self._env_decryptor = self._get_env_decryptor()
         self._key, self._iv = self.decrypt_envelope(self._envelope)
-        self._body_decryptor = self._get_body_decryptor(self._key, self._iv)
-        if isinstance(self._body_decryptor, AesGcmBodyDecryptor):
-            self._body_decryptor.set_tag(self._client, self._transfer_future)
+        self._body_decryptor = self._get_body_decryptor(
+            self._key, self._iv, self._client, self._transfer_future)
+
+    def _get_transfer_length(self):
+        for body_decryptor_provider in self._config.body_decryptor_providers:
+            if body_decryptor_provider.is_compatible(self._envelope):
+                return body_decryptor_provider.get_transfer_length(
+                    self._transfer_future)
+        raise RuntimeError("No compatible body decryptor found")
 
     def _get_env_decryptor(self):
         for env_decryptor_provider in self._config.env_decryptor_providers:
@@ -57,10 +63,11 @@ class IODecryptor(object):
                 return env_decryptor_provider.get_envelope_decryptor()
         raise RuntimeError("No compatible envelope decryptor found")
 
-    def _get_body_decryptor(self, key, iv):
+    def _get_body_decryptor(self, key, iv, client, transfer_future):
         for body_decryptor_provider in self._config.body_decryptor_providers:
             if body_decryptor_provider.is_compatible(self._envelope):
-                return body_decryptor_provider.get_body_decryptor(key, iv)
+                return body_decryptor_provider.get_body_decryptor(
+                    key, iv, client, transfer_future)
         raise RuntimeError("No compatible body decryptor found")
 
     def decrypt_envelope(self, envelope):
@@ -125,6 +132,9 @@ class BodyDecryptorProvider(object):
         to the body decryption method.
         """
         raise NotImplementedError('must implement is_compatible()')
+        
+    def get_transfer_length(self, transfer_future):
+        return transfer_future.meta.size
 
     def get_body_decryptor(self):
         """Return a body decryptor for the body decryption
@@ -256,8 +266,8 @@ class AesCbcBodyDecryptorProvider(BodyDecryptorProvider):
                 return True
         return False
 
-    def get_body_decryptor(self, key, iv):
-        return AesCbcBodyDecryptor(key, iv)
+    def get_body_decryptor(self, key, iv, client, transfer_future):
+        return AesCbcBodyDecryptor(key, iv, client, transfer_future)
 
 
 class AesGcmBodyDecryptorProvider(BodyDecryptorProvider):
@@ -270,8 +280,11 @@ class AesGcmBodyDecryptorProvider(BodyDecryptorProvider):
                 return True
         return False
 
-    def get_body_decryptor(self, key, iv):
-        return AesGcmBodyDecryptor(key, iv)
+    def get_transfer_length(self, transfer_future):
+        return transfer_future.meta.size - 16
+
+    def get_body_decryptor(self, key, iv, client, transfer_future):
+        return AesGcmBodyDecryptor(key, iv, client, transfer_future)
 
 
 class KmsEnvelopeDecryptor(EnvelopeDecryptor):
@@ -333,7 +346,7 @@ class AesKeyWrapEnvelopeDecryptor(EnvelopeDecryptor):
 
 
 class AesCbcBodyDecryptor(BodyDecryptor):
-    def __init__(self, key, iv):
+    def __init__(self, key, iv, client, transfer_future):
         # Initialize the decryptor cipher
         cipher = Cipher(algorithms.AES(key),
                         modes.CBC(iv),
@@ -352,16 +365,11 @@ class AesCbcBodyDecryptor(BodyDecryptor):
 
 
 class AesGcmBodyDecryptor(BodyDecryptor):
-    def __init__(self, key, iv):
-        self.tag = b''
+    def __init__(self, key, iv, client, transfer_future):
+        self.tag_length = 16
         self.key = key
         self.iv = iv
-
-    def set_tag(self, client, transfer_future):
-        # This function only runs when initializing the cipher.
-        # Therefore it can directly run get_object task.
-        # This function must be called before performing decryption.
-        range_start = transfer_future.meta.size - tag_length
+        range_start = transfer_future.meta.size 
         range_param = 'bytes=%s-' % (range_start)
         response = client.get_object(
             Bucket=transfer_future.meta.call_args.bucket,
@@ -374,16 +382,15 @@ class AesGcmBodyDecryptor(BodyDecryptor):
 
     def set_cipher(self):
         # Initialize the decryptor cipher
+        # Unfortunately we have to provide tag first to get the decryptor.
         cipher = Cipher(algorithms.AES(self.key),
                         modes.GCM(self.iv, self.tag),
                         backend=default_backend())
         self._cipher = cipher.decryptor()
 
     def decrypt(self, chunk, final=False):
-        # The data must be in bytes form
-        if not final:
-            origin_data = self._cipher.update(chunk)
+        # The data must be in bytes format
+        origin_data = self._cipher.update(chunk)
         if final:
-            origin_data = self._cipher.update(chunk[:-16])
             origin_data += self._cipher.finalize()
         return origin_data

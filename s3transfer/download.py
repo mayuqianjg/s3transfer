@@ -385,7 +385,7 @@ class DownloadSubmissionTask(SubmissionTask):
         download_output_manager.set_transfer_size(response['ContentLength'])
         download_output_manager.get_io_helper(
             response, client, transfer_future)
-
+        
         # If it is greater than threshold do a ranged download, otherwise
         # do a regular GetObject download.
         if transfer_future.meta.size < config.multipart_threshold:
@@ -409,7 +409,12 @@ class DownloadSubmissionTask(SubmissionTask):
 
         # Get the needed callbacks for the task
         progress_callbacks = get_callbacks(transfer_future, 'progress')
-
+        
+        # Calculate the range parameter
+        range_parameter = calculate_range_parameter(
+            transfer_future.meta.size, 0, 1, transfer_future.meta.size)
+        extra_args = {'Range': range_parameter}
+        extra_args.update(call_args.extra_args)
         # Submit the task to download the object.
         download_future = self._submit_task(
             request_executor,
@@ -420,7 +425,7 @@ class DownloadSubmissionTask(SubmissionTask):
                     'bucket': call_args.bucket,
                     'key': call_args.key,
                     'fileobj': fileobj,
-                    'extra_args': call_args.extra_args,
+                    'extra_args': extra_args,
                     'callbacks': progress_callbacks,
                     'max_attempts': config.num_download_attempts,
                     'download_output_manager': download_output_manager,
@@ -456,7 +461,7 @@ class DownloadSubmissionTask(SubmissionTask):
         for i in range(num_parts):
             # Calculate the range parameter
             range_parameter = calculate_range_parameter(
-                part_size, i, num_parts)
+                part_size, i, num_parts, transfer_future.meta.size)
 
             # Inject the Range parameter to the parameters to be passed in
             # as extra args
